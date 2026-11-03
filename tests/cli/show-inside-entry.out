@@ -1,0 +1,3 @@
+INSERT 1
+tests/cli/show-inside-entry.graql:3: error: no entry starts at 3
+[exit 1]

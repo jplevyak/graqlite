@@ -1,0 +1,29 @@
+-- Optional patterns: "and, if there is one, ...".
+
+insert /ann a person ; name Ann ; email "ann@example.com" .
+       /ben a person ; name Ben .
+       /cat a person ; name Cat ; email "cat@example.org" .
+       "cat@example.org" verified yes
+
+-- `optional ( p )` keeps each row, extended by each match of p if it has
+-- any.  Variables only p binds are left unbound (shown as an empty cell).
+select ?n, ?e by ?n where ?p a person ; name ?n and optional ( ?p email ?e )
+
+-- The grammar's `-` modifier is short for an optional predicate.
+select ?n, ?e by ?n where ?p a person ; name ?n ; email ?e -
+
+-- Optional patterns nest: the email, and whether it is verified.
+select ?n, ?e, ?ok by ?n
+  where ?p name ?n and optional ( ?p email ?e and optional ( ?e verified ?ok ) )
+
+-- A comparison with an unbound variable fails...
+select ?n by ?n where ?p name ?n ; email ?e - . ?e != "ann@example.com"
+
+-- ...and a negation with one holds: people without a verified email.
+select ?n by ?n where ?p name ?n ; email ?e - and not ( ?e verified yes )
+
+-- Templates leave out triples with unbound variables.
+insert ?p contact ?e where ?p a person ; email ?e -
+
+\format csv
+select ?n, ?e by ?n where ?p name ?n ; email ?e -

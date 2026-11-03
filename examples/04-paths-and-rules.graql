@@ -1,0 +1,33 @@
+-- Transitive paths, and rules: named, recursive relations, saved in the
+-- database.
+
+insert /ann parent /ben .
+       /ben parent /cat .
+       /cat parent /dan .
+       /eve parent /fay
+
+-- `p++` follows one or more `p` links.
+select ?d where /ann parent++ ?d
+
+-- A rule defines a relation by a pattern.  Several rules may define one
+-- relation, and a rule may call itself.
+rule ancestor(?x ?y) ?x parent ?y
+
+rule ancestor(?x ?y) ?x parent ?z . ancestor(?z ?y)
+
+select ?a, ?d where ancestor(?a ?d) . ?d = /dan
+
+-- Rules may use other rules, and negation of other rules.
+rule root(?x) ?x parent ? . not ancestor(? ?x)
+
+select ?r by ?r where root(?r)
+
+-- \dr lists the saved rules; they last until deleted.
+\dr
+
+-- Defining a rule that is saved already does nothing.
+rule ancestor(?x ?y) ?x parent ?y
+
+delete rule root
+
+\dr

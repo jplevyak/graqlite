@@ -1,0 +1,31 @@
+INSERT 4
+expanded output is on
+-[ RECORD 1 ]
+p | "graqlite:key"
+o | "/ann"
+-[ RECORD 2 ]
+p | age
+o | 41
+-[ RECORD 3 ]
+p | city
+o | paris
+(3 rows)
+expanded output is off
+output format is csv
+p,age
+/ben,17
+/ann,41
+output format is aligned
+ predicate | links | subjects | objects
+-----------+-------+----------+---------
+ age       | 2     | ~2       | ~2
+ city      | 2     | ~2       | ~2
+(2 rows)
+scan (?p city paris) via predicate+object index, rows ~1
+bind join (?p age ?a) via subject+predicate index, rows ~1
+filter test(?a)
+BEGIN
+INSERT 1
+true
+ROLLBACK
+false

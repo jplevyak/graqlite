@@ -1,0 +1,3 @@
+insert /a p 1
+
+verify as of "last tuesday" /a p 1

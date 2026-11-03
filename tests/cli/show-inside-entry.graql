@@ -1,0 +1,3 @@
+insert /a knows /b
+-- Id 3 is inside the value "graqlite:key", not the start of an entry.
+\show 3

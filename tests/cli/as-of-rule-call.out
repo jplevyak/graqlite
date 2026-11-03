@@ -1,0 +1,11 @@
+INSERT 1
+RULE ancestor
+ y
+---
+(0 rows)
+ y
+----
+ /b
+(1 row)
+tests/cli/as-of-rule-call.graql:12: error: a rule can't be called in an 'as of' group: give the statement 'as of'
+[exit 1]

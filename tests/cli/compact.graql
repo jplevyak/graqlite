@@ -1,0 +1,78 @@
+insert /p1 type person ; city /paris
+insert /p2 type person ; city /paris
+insert /p3 type person ; city /paris
+insert /p4 type person ; city /paris
+insert /p5 type person ; city /paris
+insert /p6 type person ; city /paris
+insert /p7 type person ; city /paris
+insert /p8 type person ; city /paris
+insert /p9 type person ; city /paris
+insert /p10 type person ; city /paris
+insert /p11 type person ; city /paris
+insert /p12 type person ; city /paris
+insert /p13 type person ; city /paris
+insert /p14 type person ; city /paris
+insert /p15 type person ; city /paris
+insert /p16 type person ; city /paris
+insert /p17 type person ; city /paris
+insert /p18 type person ; city /paris
+insert /p19 type person ; city /paris
+insert /p20 type person ; city /paris
+insert /p21 type person ; city /paris
+insert /p22 type person ; city /paris
+insert /p23 type person ; city /paris
+insert /p24 type person ; city /paris
+insert /p25 type person ; city /paris
+insert /p26 type person ; city /paris
+insert /p27 type person ; city /paris
+insert /p28 type person ; city /paris
+insert /p29 type person ; city /paris
+insert /p30 type person ; city /paris
+insert /p31 type person ; city /paris
+insert /p32 type person ; city /paris
+insert /p33 type person ; city /paris
+insert /p34 type person ; city /paris
+insert /p35 type person ; city /paris
+insert /p36 type person ; city /paris
+insert /p37 type person ; city /paris
+insert /p38 type person ; city /paris
+insert /p39 type person ; city /paris
+insert /p40 type person ; city /paris
+insert /p41 type person ; city /paris
+insert /p42 type person ; city /paris
+insert /p43 type person ; city /paris
+insert /p44 type person ; city /paris
+insert /p45 type person ; city /paris
+insert /p46 type person ; city /paris
+insert /p47 type person ; city /paris
+insert /p48 type person ; city /paris
+insert /p49 type person ; city /paris
+insert /p50 type person ; city /paris
+insert /p51 type person ; city /paris
+insert /p52 type person ; city /paris
+insert /p53 type person ; city /paris
+insert /p54 type person ; city /paris
+insert /p55 type person ; city /paris
+insert /p56 type person ; city /paris
+insert /p57 type person ; city /paris
+insert /p58 type person ; city /paris
+insert /p59 type person ; city /paris
+insert /p60 type person ; city /paris
+insert /p61 type person ; city /paris
+insert /p62 type person ; city /paris
+insert /p63 type person ; city /paris
+insert /p64 type person ; city /paris
+insert /p65 type person ; city /paris
+insert /p66 type person ; city /paris
+insert /p67 type person ; city /paris
+insert /p68 type person ; city /paris
+insert /p69 type person ; city /paris
+insert /p70 type person ; city /paris
+delete ?p city /paris where ?p city /paris
+insert ?p city /rome where ?p type person
+select count(*) where ?p city ?c
+\compact "2026-10-31T12:00:00Z"
+\compact 5
+select count(*) where ?p city ?c
+\info
+select count(*) as of 100 where ?p city ?c

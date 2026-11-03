@@ -1,0 +1,38 @@
+INSERT 17
+ city  | people
+-------+--------
+ paris | 3
+ rome  | 2
+ oslo  | 1
+(3 rows)
+ matches | cities
+---------+--------
+ 6       | 3
+(1 row)
+ city  | mean | min(?age) | max(?age)
+-------+------+-----------+-----------
+ oslo  | 65   | 65        | 65
+ paris | 35   | 29        | 41
+ rome  | 23   | 17        | 29
+(3 rows)
+ city  | people | aged
+-------+--------+------
+ oslo  | 1      | 1
+ paris | 3      | 2
+ rome  | 2      | 2
+(3 rows)
+ p    | friends
+------+---------
+ /dan | 3
+ /ann | 2
+(2 rows)
+ city | oldest
+------+--------
+ oslo | 65
+(1 row)
+ p    | age
+------+-----
+ /dan | 65
+ /ann | 41
+ /cat | 29
+(3 rows)

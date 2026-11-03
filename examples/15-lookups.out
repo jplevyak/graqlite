@@ -1,0 +1,95 @@
+INSERT 27
+ link | subject | predicate | object
+------+---------+-----------+----------------
+ #45  | /joe    | type      | person
+ #125 | /ann    | type      | person
+ #199 | /ann    | type      | /people/woman
+ #233 | /billy  | type      | person
+ #305 | /will   | type      | person
+ #672 | /woody  | type      | /people/person
+(6 rows)
+ p
+--------
+ /ann
+ /billy
+(2 rows)
+ link | subject | predicate | object
+------+---------+-----------+----------------
+ #45  | /joe    | type      | person
+ #67  | /joe    | name      | Joe
+ #125 | /ann    | type      | person
+ #142 | /ann    | name      | Ann
+ #199 | /ann    | type      | /people/woman
+ #233 | /billy  | type      | person
+ #256 | /billy  | name      | "Billy Bob"
+ #305 | /will   | type      | person
+ #323 | /will   | name      | Will
+ #672 | /woody  | type      | /people/person
+ #697 | /woody  | name      | "Woody Allen"
+(11 rows)
+ link | subject | predicate | object
+------+---------+-----------+--------
+      | /ann    |           |
+      | /billy  |           |
+(2 rows)
+ link | subject | predicate | object
+------+---------+-----------+--------
+ #391 | /billy  | pet       | /tom
+ #425 | /billy  | pet       | /fido
+(2 rows)
+ link | subject     | predicate              | object
+------+-------------+------------------------+--------
+ #773 | /annie_hall | /film/film/directed_by | /woody
+ #874 | /annie_hall | /film/film/starring    | #787
+ #914 | /tiger_lily | /film/film/directed_by | /woody
+ #966 | /tiger_lily | /film/film/starring    | #929
+(4 rows)
+ film
+-------------
+ /annie_hall
+ /tiger_lily
+(2 rows)
+ n             | pet
+---------------+-------
+ Ann           | /rex
+ "Billy Bob"   | /tom
+ "Billy Bob"   | /fido
+ Joe           |
+ Will          |
+ "Woody Allen" |
+(6 rows)
+ p      | o
+--------+-------
+ /billy | /tom
+ /billy | /fido
+(2 rows)
+ p
+------
+ /ann
+(1 row)
+ p
+--------
+ /ann
+ /billy
+(2 rows)
+ p
+--------
+ /ann
+ /billy
+(2 rows)
+ p
+--------
+ /billy
+(1 row)
+ p
+--------
+ /billy
+(1 row)
+ s
+----------
+ /state/a
+(1 row)
+ p    | m
+------+-----
+ /joe | 180
+(1 row)

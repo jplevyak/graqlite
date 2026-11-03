@@ -1,0 +1,62 @@
+-- A lookup can assert links as well as match them: a triple followed by !
+-- is not matched but added to the lookup's graph, for each match of the
+-- rest of the pattern.  Nothing is written, unless the graph is inserted.
+
+insert /ann /parent/of /ben . /ben /parent/of /cat , /dan .
+       /ann name "John Smith" . /dan name "John Smith" ; pet /rex , /felix
+
+-- Each John Smith is alive, in the result: the asserted links come from
+-- the links of the match that asserted them.
+lookup ?p name "John Smith" . ?p is_alive true!
+verify /ann is_alive true
+
+-- A scope, @?pet, asserts once for each value of ?pet too, and not where
+-- it is unbound: so only John Smiths with a pet are pet lovers.  Links are
+-- a set: Dan, with two pets, is one pet lover.
+lookup ?p name "John Smith" ; pet ?pet - . ?p pet_lover true! @?pet
+-- Without it, every John Smith is.
+lookup ?p name "John Smith" ; pet ?pet - . ?p pet_lover true!
+
+-- A blank node is a new node for each assertion: a record for each pet.
+lookup ?p name "John Smith" ; pet ?pet - . ?p pet_record [ animal ?pet ]! @?pet
+
+-- An asserted triple that is stored is its stored link.
+lookup ?p pet ?x . ?p name "John Smith"!
+
+-- A rule's body can assert links too, with its head's variables: for each
+-- tuple the rule derives, when a lookup calls it.
+rule grandparent(?g ?c) ?g /parent/of [ /parent/of ?c ] . ?c has_grandparent true!
+lookup grandparent(/ann ?c)
+
+-- Inserting the graph writes its asserted links, with a new node for each
+-- blank node.
+insert graph ( lookup ?p name "John Smith" ; pet ?pet - . ?p pet_record [ animal ?pet ]! @?pet )
+select ?pet where /dan pet_record ?r . ?r animal ?pet
+
+-- The tour's Man Booker example: every nomination, with links flagging the
+-- winning works, one per winner (@?winner), and none for the nominations
+-- that didn't win, whose ?winner is unbound.  (Corrected from the tour: a
+-- nomination's year is tied to the win's, and the winners are optional.)
+insert /en/man_booker_prize name "Man Booker Prize" ;
+         /award/award_category/winners
+           [ /award/award_honor/year 1981 ; /award/award_honor/honored_for /midnights_children ] ,
+           [ /award/award_honor/year 1989 ; /award/award_honor/honored_for /the_remains ] ;
+         /award/award_category/nominees
+           [ /award/award_nomination/year 1981 ;
+             /award/award_nomination/award_nominee [ name "Salman Rushdie" ] ;
+             /award/award_nomination/nominated_for /midnights_children ] ,
+           [ /award/award_nomination/year 1981 ;
+             /award/award_nomination/award_nominee [ name "Muriel Spark" ] ;
+             /award/award_nomination/nominated_for /loitering ] .
+       /midnights_children name "Midnight's Children" .
+       /loitering name "Loitering with Intent" .
+       /the_remains name "The Remains of the Day"
+lookup
+  /en/man_booker_prize
+    /award/award_category/nominees [
+      /award/award_nomination/year ?year ;
+      /award/award_nomination/nominated_for [ :?work name ?title ] ] ;
+    /award/award_category/winners [ :?winner
+      /award/award_honor/year ?year ;
+      /award/award_honor/honored_for ?work ] - .
+  ?work is_winner /en/man_booker_prize ! @?winner

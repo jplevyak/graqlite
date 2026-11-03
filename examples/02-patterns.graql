@@ -1,0 +1,25 @@
+-- Patterns are written as in Turtle.
+
+-- `;` separates predicates of one subject, `,` objects of one predicate,
+-- and `.` subjects.  `a` is short for the predicate `type`.
+insert /alice a person ; knows /bob, /carol ; age 30 .
+       /bob a person ; knows /carol ; age 25 .
+       /carol a person ; age 35 .
+       /rex a dog ; owner /carol
+
+select ?x where ?x a person ; knows /carol
+
+-- `?` is a variable of its own: here, "anyone".  Rows repeat for each
+-- match, so /alice, who knows two people, would appear twice without
+-- `distinct`.
+select distinct ?x where ?x knows ?
+
+-- `[ ... ]` is a blank node with predicates: someone ?x knows who is 35.
+select ?x where ?x knows [ age 35 ]
+
+-- `_:name` names a blank node, to use it twice: two people who know the
+-- same person.
+select distinct ?x, ?y where ?x knows _:c . ?y knows _:c . ?x != ?y
+
+-- Braces group subjects.
+select ?pet where { ?pet a dog . ?pet owner ?o . ?o age 35 }

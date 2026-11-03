@@ -1,0 +1,27 @@
+-- The shell's backslash commands.
+
+insert /ann age 41 ; city paris .
+       /ben age 17 ; city rome
+
+-- \x shows one field per line.
+\x
+select * where /ann ?p ?o
+\x
+
+-- \format csv (or tsv) prints raw data, for other programs.
+\format csv
+select ?p, ?age by ?age where ?p age ?age
+\format aligned
+
+-- \d lists predicates, with their live links and estimated fan out.
+\d
+
+-- \explain shows how a query will run.
+\explain select ?p where ?p city paris ; age ?a . ?a > 30
+
+-- \begin ... \rollback discards changes; \commit keeps them.
+\begin
+insert /cat age 9
+verify /cat age 9
+\rollback
+verify /cat age 9

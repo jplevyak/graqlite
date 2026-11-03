@@ -1,0 +1,2 @@
+tests/cli/unknown-rule.graql:1: error: unknown rule 'nothing'
+[exit 1]

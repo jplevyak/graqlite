@@ -1,0 +1,15 @@
+-- Statements spanning lines, several on a line, comments, and blank
+-- lines within strings and comments.
+insert /a name "first line
+
+third line" .
+       /a age 3 /* a comment
+
+with a blank line */ ; size 9
+
+select ?n where /a name ?n verify /a age 3
+
+select ?x
+  where ?x age ?a ;
+           size ?s
+  . ?a < ?s

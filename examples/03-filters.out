@@ -1,0 +1,47 @@
+INSERT 15
+ p    | age
+------+-----
+ /cat | 29
+ /eve | 29
+ /ann | 41
+ /dan | 65
+(4 rows)
+ p    | age
+------+-----
+ /ben | 17
+ /cat | 29
+(2 rows)
+ p    | c
+------+-------
+ /dan | oslo
+ /ann | paris
+ /cat | paris
+(3 rows)
+ a    | b
+------+------
+ /ann | /cat
+(1 row)
+ p
+------
+ /ann
+ /cat
+ /dan
+(3 rows)
+ p
+------
+ /ann
+ /cat
+ /dan
+(3 rows)
+ p
+------
+ /ben
+ /dan
+ /eve
+(3 rows)
+ c
+-------
+ oslo
+ paris
+ rome
+(3 rows)

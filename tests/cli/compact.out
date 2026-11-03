@@ -1,0 +1,92 @@
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+INSERT 2
+DELETE 70
+INSERT 70
+ count(*)
+----------
+ 70
+(1 row)
+compacted to 5228: dropped 420 ids from 3 large index entries
+compacted to 5228: dropped 0 ids from 0 large index entries
+ count(*)
+----------
+ 70
+(1 row)
+database:     in memory
+ids:          1 to 5229
+history:      72 commits, 2026-10-31T12:00:00Z to 2026-10-31T12:00:00Z
+links:        212 live, 70 deleted
+predicates:   3
+rules:        0
+transaction:  none
+compacted:    to 5228, so as of earlier fails
+tests/cli/compact.graql:78: error: as of 100 is before 5228, the horizon the indexes are compacted to
+[exit 1]

@@ -1,0 +1,34 @@
+INSERT 9
+ n   | e
+-----+-------------------
+ Ann | "ann@example.com"
+ Ben |
+ Cat | "cat@example.org"
+(3 rows)
+ n   | e
+-----+-------------------
+ Ann | "ann@example.com"
+ Ben |
+ Cat | "cat@example.org"
+(3 rows)
+ n   | e                 | ok
+-----+-------------------+-----
+ Ann | "ann@example.com" |
+ Ben |                   |
+ Cat | "cat@example.org" | yes
+(3 rows)
+ n
+-----
+ Cat
+(1 row)
+ n
+-----
+ Ann
+ Ben
+(2 rows)
+INSERT 2
+output format is csv
+n,e
+Ann,ann@example.com
+Ben,
+Cat,cat@example.org

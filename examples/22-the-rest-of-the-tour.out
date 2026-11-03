@@ -1,0 +1,85 @@
+INSERT 23
+ link | subject | predicate | object
+------+---------+-----------+--------
+ #67  | /joe    | name      | Joe
+(1 row)
+ link | subject | predicate | object
+------+---------+-----------+---------------
+ #67  | /joe    | name      | Joe
+ #142 | /ann    | name      | Ann
+ #256 | /billy  | name      | "Billy Bob"
+ #323 | /will   | name      | Will
+ #359 | /ann    | pet       | /rex
+ #391 | /billy  | pet       | /tom
+ #425 | /billy  | pet       | /fido
+ #514 | /woody  | name      | "Woody Allen"
+(8 rows)
+ link | subject | predicate | object
+------+---------+-----------+--------
+ #45  | /joe    | type      | person
+ #125 | /ann    | type      | person
+(2 rows)
+ link | subject | predicate | object
+------+---------+-----------+--------
+ #125 | /ann    | type      | person
+ #233 | /billy  | type      | person
+ #359 | /ann    | pet       | /rex
+ #391 | /billy  | pet       | /tom
+(4 rows)
+ link | subject     | predicate               | object
+------+-------------+-------------------------+--------
+ #590 | /annie_hall | /film/film/directed_by  | /woody
+ #643 | #604        | /film/performance/actor | /woody
+ #691 | /annie_hall | /film/film/starring     | #604
+(3 rows)
+FUNCTION foo
+ three
+-------
+ 3
+(1 row)
+FUNCTION kg
+ p      | kg(?m)
+--------+-----------
+ /joe   | 81.818182
+ /ann   | 13.636364
+ /billy | 15.909091
+(3 rows)
+FUNCTION sum_int
+ five
+------
+ 5
+(1 row)
+FUNCTION size
+ p      | size(?m)
+--------+----------
+ /ann   | small
+ /billy | small
+(2 rows)
+RULE owns
+ o
+------
+ /ann
+(1 row)
+output format is tree
+/ann
+  /rex
+/billy
+  /tom
+  /fido
+output format is aligned
+RULE simple_property
+INSERT 1
+ g
+-----------------------
+ "the film's director"
+(1 row)
+RULE property
+INSERT 6
+ p                       | c
+-------------------------+---
+ /film/performance/actor | 1
+ /film/film/starring     | 0
+(2 rows)
+TEST "two lookups of Woody Allen's films agree" passed
+examples/22-the-rest-of-the-tour.graql:71: error: TEST "these differ" failed: the results differ
+[exit 1]

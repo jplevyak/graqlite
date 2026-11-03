@@ -1,0 +1,72 @@
+INSERT 8
+ link | subject | predicate    | object       | derived
+------+---------+--------------+--------------+--------------------
+ #77  | /ann    | /parent/of   | /ben         |
+ #109 | /ben    | /parent/of   | /cat         |
+ #141 | /ben    | /parent/of   | /dan         |
+ #170 | /ann    | name         | "John Smith" |
+      | /ann    | /parent/of++ | /ben         | path from #77
+      | /ann    | /parent/of++ | /cat         | path from #77 #109
+      | /ann    | /parent/of++ | /dan         | path from #77 #141
+(7 rows)
+RULE grandparent
+ link | subject | predicate   | object | derived
+------+---------+-------------+--------+--------------------------------
+ #77  | /ann    | /parent/of  | /ben   |
+ #109 | /ben    | /parent/of  | /cat   |
+ #141 | /ben    | /parent/of  | /dan   |
+      | /ann    | grandparent | /cat   | rule grandparent from #77 #109
+      | /ann    | grandparent | /dan   | rule grandparent from #77 #141
+(5 rows)
+RULE ancestor
+RULE ancestor
+ link | subject | predicate  | object | derived
+------+---------+------------+--------+-----------------------------
+ #77  | /ann    | /parent/of | /ben   |
+ #109 | /ben    | /parent/of | /cat   |
+ #141 | /ben    | /parent/of | /dan   |
+      | /ann    | ancestor   | /ben   | rule ancestor from #77
+      | /ann    | ancestor   | /cat   | rule ancestor from #77 #109
+      | /ann    | ancestor   | /dan   | rule ancestor from #77 #141
+(6 rows)
+ link | subject | predicate               | object | derived
+------+---------+-------------------------+--------+---------------------
+ #257 | /ann    | knows                   | /eve   |
+ #276 | /eve    | likes                   | /dan   |
+      | /ann    | (knows / likes | knows) | /dan   | path from #257 #276
+      | /ann    | (knows / likes | knows) | /eve   | path from #257
+(4 rows)
+ link | subject | predicate            | object | derived
+------+---------+----------------------+--------+---------------------
+ #257 | /ann    | knows                | /eve   |
+ #276 | /eve    | likes                | /dan   |
+      | /dan    | (^likes / ^(knows+)) | /ann   | path from #276 #257
+(3 rows)
+ link | subject | predicate       | object | derived
+------+---------+-----------------+--------+--------------------
+ #77  | /ann    | /parent/of      | /ben   |
+ #109 | /ben    | /parent/of      | /cat   |
+ #141 | /ben    | /parent/of      | /dan   |
+      | /ann    | (/parent/of{2}) | /cat   | path from #77 #109
+      | /ann    | (/parent/of{2}) | /dan   | path from #77 #141
+(5 rows)
+ link | subject | predicate             | object | derived
+------+---------+-----------------------+--------+--------------------
+ #77  | /ann    | /parent/of            | /ben   |
+ #109 | /ben    | /parent/of            | /cat   |
+ #141 | /ben    | /parent/of            | /dan   |
+ #257 | /ann    | knows                 | /eve   |
+      | /ann    | (knows | /parent/of+) | /ben   | path from #77
+      | /ann    | (knows | /parent/of+) | /cat   | path from #77 #109
+      | /ann    | (knows | /parent/of+) | /dan   | path from #77 #141
+      | /ann    | (knows | /parent/of+) | /eve   | path from #257
+(8 rows)
+ link | subject | predicate | object
+------+---------+-----------+--------
+ #257 | /ann    | knows     | /eve
+ #276 | /eve    | likes     | /dan
+(2 rows)
+ link | subject | predicate | object
+------+---------+-----------+--------
+ #219 | /dan    | pet       | /rex
+(1 row)

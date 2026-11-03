@@ -1,0 +1,53 @@
+-- The GraQL side of docs/graql-comparison.md: each query the comparison
+-- translates into GQL, Cypher, SPARQL and Gremlin, on one small graph.
+
+insert /alice a person ; name Alice ; age 34 ; city paris ; email "alice@example.com" ;
+              knows /bob , /carol .
+       /bob a person ; name Bob ; age 27 ; city rome ; knows /carol .
+       /carol a person ; name Carol ; age 52 ; city paris .
+       /dan a person ; name Dan ; age 8 ; city paris .
+       /eve a person ; name Eve ; age 61 ; city oslo .
+       /eve parent /carol . /carol parent /alice . /alice parent /dan .
+       /bob guardian /dan .
+       /alice price 12 ; qty 10 . /bob price 3.5 ; qty 2 . /carol price 40 ; qty 3
+
+-- 1. A pattern with a filter: people Alice knows who are under 40.
+select ?who, ?age where /alice knows ?who . ?who age ?age . ?age < 40
+
+-- 2. Optional: everyone, with an email if they have one.
+select ?n, ?e by ?n where ?p a person ; name ?n and optional ( ?p email ?e )
+
+-- 3. Aggregates: people per city, most first.
+select ?c, count(?p) as ?n by ?n desc, ?c where ?p city ?c
+
+-- 4. Paths: everyone above Dan, through parents or guardians.
+select ?a by ?a where /dan ((^parent | ^guardian)+) ?a
+
+-- 5. Recursive rules, with negation: the roots of the parent tree.
+rule ancestor(?x ?y) ?x parent ?y
+
+rule ancestor(?x ?y) ?x parent ?z . ancestor(?z ?y)
+
+rule root(?x) ?x parent ? . not ancestor(? ?x)
+
+select ?r where root(?r)
+
+-- 6. Statements about links: when Alice met each friend.
+insert << /alice knows /bob >> since 2019 .
+       << /alice knows /carol >> since 2021
+
+select ?who, ?y by ?y where << /alice knows ?who >> since ?y
+
+-- 7. Expressions: revenue per city.
+select ?c, sum(?p * ?q) as ?revenue by ?revenue desc where ?x city ?c ; price ?p ; qty ?q
+
+-- 8. Parameters: the same query for any person.
+\set who /bob
+select ?f where $who knows ?f
+
+-- 9. History: whom Alice knew before a change, and doesn't now.  #190 is
+-- the link "/alice knows /bob"; the page writes the same with a time, as
+-- in `as of "2026-01-01"`.
+delete /alice knows /bob
+
+select ?who where ( /alice knows ?who ) as of 190 and not ( /alice knows ?who )

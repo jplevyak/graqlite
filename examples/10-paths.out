@@ -1,0 +1,61 @@
+INSERT 8
+ g
+------
+ /cat
+(1 row)
+ x
+------
+ /hal
+(1 row)
+ p
+------
+ /ben
+(1 row)
+ p
+------
+ /ben
+ /eve
+(2 rows)
+ d
+------
+ /ben
+ /cat
+ /dan
+(3 rows)
+ d
+------
+ /ann
+ /ben
+ /cat
+ /dan
+(4 rows)
+ d
+------
+ /cat
+ /dan
+(2 rows)
+ x
+------
+ /gus
+ /hal
+(2 rows)
+ a
+------
+ /ann
+ /ben
+ /cat
+ /eve
+(4 rows)
+ x    | y
+------+------
+ /ann | /dan
+(1 row)
+ p              | d
+----------------+--------
+ "graqlite:key" | "/ann"
+ knows          | /eve
+ knows          | /fay
+ parent         | /ben
+ parent         | /cat
+ parent         | /dan
+(6 rows)

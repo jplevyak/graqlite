@@ -1,0 +1,27 @@
+INSERT 4
+ who
+------
+ /bob
+(1 row)
+ person | age
+--------+-----
+ /alice | 30
+ /bob   | 25
+(2 rows)
+true
+false
+ link | subject | predicate | object
+------+---------+-----------+--------
+ #60  | /alice  | knows     | /bob
+(1 row)
+DELETE 1
+ p              | o
+----------------+--------
+ "graqlite:key" | "/bob"
+ age            | 25
+(2 rows)
+#1 node /alice
+committed 2026-10-31T12:00:00Z
+links out (2):
+  knows /bob
+  age 30

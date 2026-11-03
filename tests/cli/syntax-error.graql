@@ -1,0 +1,7 @@
+insert /a age 3
+
+-- Stops at the first error, reporting its file, line and column.
+select ?x where
+  /a age ) ?x
+
+select ?never where /a age ?never

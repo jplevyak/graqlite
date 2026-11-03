@@ -1,0 +1,4 @@
+\begin
+insert /a age 3
+-- A failing statement rolls back its transaction.
+insert ?unbound age 4

@@ -1,0 +1,44 @@
+INSERT 13
+ n   | total | half
+-----+-------+------
+ Ann | 120   | 6
+ Cat | 120   | 20
+ Ben | 7     | 1.75
+(3 rows)
+ n
+-----
+ Ann
+ Cat
+(2 rows)
+ n   | total
+-----+-------
+ Ann | 120
+ Ben | 7
+ Cat | 120
+(3 rows)
+ upper(?n) | length(?c) | concat(?n, " of ", ?c)
+-----------+------------+------------------------
+ ANN       | 5          | "Ann of paris"
+ CAT       | 5          | "Cat of paris"
+(2 rows)
+ n   | bound(?e) | length(?e)
+-----+-----------+------------
+ Ann | true      | 15
+ Ben | false     |
+ Cat | false     |
+(3 rows)
+ c     | revenue
+-------+---------
+ paris | 240
+ rome  | 7
+(2 rows)
+ n
+-----
+ Ann
+ Ben
+ Cat
+(3 rows)
+ utc
+------------------------
+ "2026-10-31T12:30:00Z"
+(1 row)

@@ -1,0 +1,34 @@
+INSERT 4
+ d
+------
+ /ben
+ /cat
+ /dan
+(3 rows)
+RULE ancestor
+RULE ancestor
+ a    | d
+------+------
+ /ann | /dan
+ /ben | /dan
+ /cat | /dan
+(3 rows)
+RULE root
+ r
+------
+ /ann
+ /eve
+(2 rows)
+ rule            | body
+-----------------+----------------------------------------------
+ ancestor(?x ?y) | ?x parent ?y
+ ancestor(?x ?y) | ?x parent ?z . ancestor(?z ?y)
+ root(?x)        | ?x parent _:b1 and not ( ancestor(_:b2 ?x) )
+(3 rows)
+RULE ancestor
+DELETE RULE root (1 definition)
+ rule            | body
+-----------------+--------------------------------
+ ancestor(?x ?y) | ?x parent ?y
+ ancestor(?x ?y) | ?x parent ?z . ancestor(?z ?y)
+(2 rows)

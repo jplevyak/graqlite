@@ -1,0 +1,65 @@
+-- Aggregates can derive links: COUNT(s p o) derives, for each subject, a
+-- link s p n to its count, and ORDER(s p key) a link to its rank, from 0.
+-- The rest of the pattern can match those links.  Counts and ranks that
+-- aren't values in the graph are held in memory; nothing is written.
+
+insert /ann /parent/of /ben . /ben /parent/of /cat , /dan .
+       /dan name "John Smith" ; pet /rex , /felix
+
+-- Each grandparent's grandchildren, counted: from the links of the rows
+-- counted.
+lookup ?g /parent/of ?p . ?p /parent/of ?c . COUNT(?g number_of_grandkids ?c)
+-- A scope, @?g, counts separately for each grandparent: each parent's
+-- children, for each of their parents.
+lookup ?g /parent/of ?p . ?p /parent/of ?c . COUNT(?p number_of_kids ?c) @?g
+-- COUNT counts rows binding the object, as SQL does; distinct counts its
+-- values.
+lookup ?p pet ?x . ?p pet ?y . COUNT(?p pets ?x)
+lookup ?p pet ?x . ?p pet ?y . COUNT(distinct ?p pets ?x)
+
+-- Each person's current spouse: their ongoing marriages ranked, by when
+-- they began, and the first matched.  The ranking ranks the rows of the
+-- rest of the pattern, its negations included, but not the patterns
+-- matching its own links: so only ongoing marriages are ranked.
+insert [ a marriage ; spouse /ann , /bob ; began 1990 ; ended 2000 ] .
+       [ a marriage ; spouse /ann , /cy ; began 2005 ] .
+       [ a marriage ; spouse /bob , /dee ; began 2003 ]
+rule current_spouse(?person ?other) {
+  ?marriage spouse ?person ; began ?from ; spouse ?other .
+  ?other != ?person .
+  ORDER(?marriage marriage_order ?from) @?person .
+  ?marriage marriage_order (= 0) .
+  not ?marriage ended
+}
+select ?p, ?s by ?p where current_spouse(?p ?s)
+
+-- Each person's marriages, latest first: ranks within each person's (the
+-- scope).  Ties share a rank, and the ranks after them are skipped, as
+-- SQL's RANK does: Eve's two marriages of 2010 are both 0, and her third
+-- is 2.
+insert [ a marriage ; spouse /eve , /fay ; began 2010 ] .
+       [ a marriage ; spouse /eve , /gus ; began 2010 ] .
+       [ a marriage ; spouse /eve , /kim ; began 2001 ]
+select ?m, ?from, ?r by ?r, ?from where ?m spouse /eve ; began ?from .
+  ORDER(?m rank ?from desc) . ?m rank ?r
+-- DENSE_RANK doesn't skip; ROW_NUMBER gives each its own, equal keys in the
+-- order of the subjects' ids.  REVERSE_ORDER is ORDER(... desc).
+select ?from, ?r by ?r where ?m spouse /eve ; began ?from .
+  DENSE_RANK(?m rank ?from desc) . ?m rank ?r
+select ?from, ?r by ?r where ?m spouse /eve ; began ?from .
+  ROW_NUMBER(?m rank ?from desc) . ?m rank ?r
+select ?from, ?r by ?r where ?m spouse /eve ; began ?from .
+  REVERSE_ORDER(?m rank ?from) . ?m rank ?r
+
+-- A subject with no key is ranked last, in either direction.
+insert [ a marriage ; spouse /hal , /ivy ] .
+       [ a marriage ; spouse /hal , /jan ; began 1999 ]
+select ?o, ?r by ?r where ?m spouse /hal , ?o . ?o != /hal
+  and optional ( ?m began ?from ) and ORDER(?m rank ?from) and ?m rank ?r
+select ?o, ?r by ?r where ?m spouse /hal , ?o . ?o != /hal
+  and optional ( ?m began ?from ) and ORDER(?m rank ?from desc) and ?m rank ?r
+
+-- Inserting a rank writes it as a value.
+insert ?m first true where ?m spouse /hal ; began ?from .
+  ORDER(?m order ?from) . ?m order 0
+select ?o where ?m first true ; spouse ?o . ?o != /hal

@@ -1,0 +1,51 @@
+-- Statements about links, and querying the past.
+
+insert /ann knows /ben , /cat
+
+-- `<< s p o >>` is the link s p o, as a node: here, the subject of
+-- statements about when and where we learned that /ann knows /ben.
+insert << /ann knows /ben >> since 2019 ; source /census
+
+select ?who, ?year where << /ann knows ?who >> since ?year
+
+-- `<< :?l s p o >>` binds the link to ?l.  A link's id is when it was made,
+-- since ids increase as entries are appended.
+\ids
+select ?who, ?l where << :?l /ann knows ?who >>
+\ids
+
+-- Link nodes nest: a statement about a statement.
+insert << << /ann knows /cat >> since 2021 >> source /letters
+
+select ?who, ?year, ?s where << << /ann knows ?who >> since ?year >> source ?s
+
+-- History: deleting appends a dead link, and the past stays queryable.
+delete /ann knows /cat
+
+insert /ann knows /dan
+
+select ?who where /ann knows ?who
+
+-- `as of N` sees the graph as it was when the entry with id N was appended.
+-- Link #58 is "/ann knows /ben" above, and #90 is "/ann knows /cat".
+select ?who as of 90 where /ann knows ?who
+
+verify as of 90 /ann knows /cat
+
+-- A group can see the past while the rest of the pattern sees the present:
+-- who /ann knew then and doesn't now.
+select ?who where ( /ann knows ?who ) as of 90 and not ( /ann knows ?who )
+
+-- Delete a statement about a link, keeping the link.
+delete ?l source /census where << :?l /ann knows /ben >>
+
+select ?p, ?o where << /ann knows /ben >> ?p ?o
+
+-- `as of` also takes a time, in ISO 8601 (UTC unless it gives an offset):
+-- the graph as of the last commit at or before then.  \show says when an
+-- entry was committed, and \info the span of the history.
+\show /dan
+
+select ?who as of "2000-01-01" where /ann knows ?who
+
+select ?who as of "2030-01-01T09:00:00+01:00" where /ann knows ?who

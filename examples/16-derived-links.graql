@@ -1,0 +1,37 @@
+-- A lookup returns a graph: the links its matches use, and links derived
+-- from them by paths and rules, each with the stored links it was derived
+-- from.  Derived links have no id.
+
+insert /ann /parent/of /ben . /ben /parent/of /cat , /dan .
+       /ann name "John Smith" . /dan name "John Smith" ; pet /rex .
+       /ann knows /eve . /eve likes /dan
+
+-- A path: a link from Ann to each descendant, through the parent links it
+-- follows (one shortest path for each), which are returned too.
+lookup [ name "John Smith" ] /parent/of++ ?descendant
+
+-- A rule's tuples are links too, if it has two columns: here from each
+-- grandparent to each grandchild, through the links that derived them.
+rule grandparent(?g ?c) ?g /parent/of [ /parent/of ?c ]
+lookup grandparent(?g ?c)
+-- A recursive rule: each derivation is through the tuples before it.
+rule ancestor(?a ?d) ?a /parent/of ?d
+rule ancestor(?a ?d) ?a /parent/of ?p . ancestor(?p ?d)
+lookup ancestor(/ann ?d)
+
+-- A path expression: each derived link is labelled by the expression,
+-- through the walk that matched it.
+lookup /ann (knows / likes | knows) ?x
+-- A walk may go backwards (^): Dan is liked by someone Ann knows.
+lookup /dan (^likes / ^knows+) ?x
+-- Steps can be keys, where a step starts (and after a / with a space):
+-- Ann's grandchildren, and those she knows or descends to.
+lookup /ann (/parent/of{2}) ?g
+lookup /ann (knows | /parent/of+) ?x
+
+-- A chain of steps alone (no + * | or {}) is patterns, so a lookup returns
+-- its stored links, and derives nothing.
+lookup /ann (knows / likes) ?x
+
+-- Only the pattern's matches derive links, not the where part's.
+lookup ?d pet ?p where /ann /parent/of++ ?d

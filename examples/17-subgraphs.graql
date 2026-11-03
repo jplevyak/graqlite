@@ -1,0 +1,67 @@
+-- Subgraphs: tags over the live facts.  A fact is in a subgraph if its
+-- latest link is live and names the subgraph, so every subgraph is part of
+-- the main graph.  And authors: who last changed a fact.
+
+insert /ann knows /ben , /cat . /ben knows /cat . /cat knows /dan .
+       /ann city paris . /ben city rome . /cat city paris . /dan city oslo
+
+-- Materializing a query's results into a subgraph: here, who knows whom
+-- among the people of Paris.  The fact was live already: it is now tagged.
+insert ?x knows ?y into paris_friends where ?x knows ?y ; city paris . ?y city paris
+
+-- Querying within a subgraph, and the main graph, which is unchanged.
+select ?x, ?y from paris_friends where ?x knows ?y
+select ?x, ?y by ?x, ?y where ?x knows ?y
+lookup ?x knows ?y in paris_friends
+verify /ann knows /ben in paris_friends
+
+-- A fact can be in several subgraphs.  The positions after a triple's
+-- object are its author and its subgraph (? for any), so ?g binds each.
+insert /ann knows /cat into old_friends
+select ?g by ?g where /ann knows /cat ? ?g
+-- Removing it from one keeps it in the others, and in the main graph.
+delete /ann knows /cat from paris_friends
+verify /ann knows /cat in old_friends
+verify /ann knows /cat
+-- Deleting the fact removes it from every subgraph.
+delete /ann knows /cat
+verify /ann knows /cat in old_friends
+
+-- Inserting into a subgraph a fact that isn't live adds it to the main
+-- graph too.
+insert /dan knows /ann into old_friends
+verify /dan knows /ann
+
+-- The session's author and subgraph, which later inserts are given.
+author /author/john
+subgraph /author/john
+insert /ann likes /dan
+-- The fourth position is the author, and the fifth the subgraph.
+lookup ? ? ? /author/john
+lookup ? ? ? ? /author/john
+select ?s, ?o where ?s likes ?o /author/john
+
+-- An author's own keys: //pet_lover is /u/<the author's id>/pet_lover.
+insert /ann //pet_lover true
+select ?p where ?p //pet_lover true
+lookup /ann ?p true
+
+-- A group within a subgraph, among others: ( p ) in g.
+select ?x where ( ?x knows /ann ) in old_friends and ?x city oslo
+
+-- Copying a lookup's links into another subgraph.
+insert graph ( lookup ?x knows ?y in old_friends ) into archive
+select ?x, ?y from archive where ?x knows ?y
+
+-- A maintained subgraph: kept as the template's links for each row of the
+-- pattern, after each commit, as the rows change.  Who knows whom among
+-- the people of each city:
+maintain ?x knows ?y into neighbours where ?x knows ?y ; city ?c . ?y city ?c
+-- None yet: Ann no longer knows Cat.
+select ?x, ?y by ?x, ?y from neighbours where ?x knows ?y
+-- Ben moves to Paris, where Ann knows him; Cat leaves.
+insert /ben city paris . /ann knows /ben
+delete /ben city rome . /cat city paris
+select ?x, ?y by ?x, ?y from neighbours where ?x knows ?y
+
+\subgraphs

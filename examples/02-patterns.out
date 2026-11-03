@@ -1,0 +1,25 @@
+INSERT 11
+ x
+--------
+ /alice
+ /bob
+(2 rows)
+ x
+--------
+ /alice
+ /bob
+(2 rows)
+ x
+--------
+ /alice
+ /bob
+(2 rows)
+ x      | y
+--------+--------
+ /alice | /bob
+ /bob   | /alice
+(2 rows)
+ pet
+------
+ /rex
+(1 row)

@@ -1,0 +1,53 @@
+INSERT 34
+ who  | age
+------+-----
+ /bob | 27
+(1 row)
+ n     | e
+-------+---------------------
+ Alice | "alice@example.com"
+ Bob   |
+ Carol |
+ Dan   |
+ Eve   |
+(5 rows)
+ c     | n
+-------+---
+ paris | 3
+ oslo  | 1
+ rome  | 1
+(3 rows)
+ a
+--------
+ /alice
+ /bob
+ /carol
+ /eve
+(4 rows)
+RULE ancestor
+RULE ancestor
+RULE root
+ r
+------
+ /eve
+(1 row)
+INSERT 2
+ who    | y
+--------+------
+ /bob   | 2019
+ /carol | 2021
+(2 rows)
+ c     | revenue
+-------+---------
+ paris | 240
+ rome  | 7
+(2 rows)
+ f
+--------
+ /carol
+(1 row)
+DELETE 1
+ who
+------
+ /bob
+(1 row)

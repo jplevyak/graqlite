@@ -1,0 +1,71 @@
+-- Defaults, nested limits, functions, rule parameters without ?, results as a
+-- forest, template rules, and TEST.
+
+insert /joe a person ; name "Joe" ; mass_lbs 180 .
+       /ann a person ; name "Ann" ; mass_lbs 30 ; type /people/woman .
+       /billy a person ; name "Billy Bob" ; mass_lbs 35 .
+       /will a person ; name "Will" .
+       /ann pet /rex . /billy pet /tom , /fido .
+       /woody a /people/person ; name "Woody Allen" .
+       /annie_hall /film/film/directed_by /woody ;
+         /film/film/starring [ /film/performance/actor /woody ] .
+       /tiger_lily /film/film/directed_by /woody ;
+         /film/film/starring [ /film/performance/actor /louise ]
+
+-- Defaults: after '-', a pattern's predicates are optional unless marked
+-- '+'; after '+' (the default anyway), mandatory unless marked '-'.
+lookup - [ name "Joe" + ; pet ?pet ]
+lookup + [ name ?n ; pet ?pet - ]
+
+-- Nested limits: the first values of a variable (the least, without BY),
+-- within each value of those limited before it.  A limit after a predicate
+-- is of its object, or of its subject if the object is a constant.
+lookup ?p a person LIMIT 2
+lookup ?p a person LIMIT 2 AND ?p pet ?pet LIMIT 1
+lookup ?film /film/film/directed_by ?director .
+         ?film /film/film/starring [ /film/performance/actor ?actor ]
+       AND ?director LIMIT 1
+       AND ?film LIMIT 1
+       AND ?actor LIMIT 1
+
+-- Functions of values, callable in expressions; '/' binds tighter than
+-- '+', and a type tag converts ('+integer' adds numbers to an integer).
+FUNCTION foo(x, y) x + y / 3
+select foo(1, 6) as ?three where /joe name ?n
+FUNCTION kg(lbs) lbs / 2.2
+select ?p, kg(?m) by ?p where ?p mass_lbs ?m
+FUNCTION sum_int(x, y) x +integer y
+select sum_int("2", "3") as ?five where /joe name ?n
+-- Conditions, in functions or anywhere an expression goes.
+FUNCTION size(lbs) if kg(lbs) > 50 || lbs = 0 then "big" else "small"
+select ?p, size(?m) by ?p where ?p mass_lbs ?m . size(?m) = "small"
+
+-- A rule's parameters can be bare names, local to the rule.
+RULE owns(who animal) { who pet animal }
+select ?o where owns(?o /rex)
+
+-- Results as a forest: each value under the one before it.
+\format tree
+select ?p, ?pet by ?p, ?pet where ?p pet ?pet
+\format aligned
+
+-- A template rule only asserts triples: called in an insert (or a graph,
+-- or assume), it is its triples, with a new node for each blank node.
+RULE simple_property(?prop ?gloss) { ?prop gloss ?gloss! }
+INSERT simple_property(/film/film/directed_by "the film's director")
+select ?g where /film/film/directed_by gloss ?g
+RULE property(?prop ?in ?gloss) {
+  ?prop /b/p/subject_meta [ /b/p/cardinality ?in ] ! .
+  ?prop /b/p/gloss ?gloss !
+}
+INSERT property(/film/film/starring 0 "an actor") .
+       property(/film/performance/actor 1 "who acted")
+select ?p, ?c by ?p where ?p /b/p/subject_meta ?m . ?m /b/p/cardinality ?c
+
+-- TEST compares two results: equal ones pass.  The where of these lookups
+-- constrains them, and returns nothing of its own: both are /woody.
+TEST "two lookups of Woody Allen's films agree"
+  LOOKUP ?d WHERE /annie_hall /film/film/directed_by ?d
+  LOOKUP ?d WHERE /tiger_lily /film/film/directed_by ?d
+-- Unequal ones fail, and the script with them.
+TEST "these differ" LOOKUP ? mass_lbs (< 40) LOOKUP ? mass_lbs (> 40)

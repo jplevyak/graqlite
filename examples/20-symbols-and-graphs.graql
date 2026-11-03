@@ -1,0 +1,46 @@
+-- SET names a constant or a graph for the session.  An identifier SET
+-- named is its value; a string never is.  A graph can be read (from graph,
+-- in graph), layered over another (base:G), and inserted.
+
+insert /joe a person ; name "Joe" ; mass_lbs 180 .
+       /ann a person ; name "Ann" ; mass_lbs 30 .
+       /billy a person ; name "Billy Bob" ; mass_lbs 35 .
+       /joe knows /ann . /ann knows /billy
+
+-- Constants: a key, numbers, a string, a boolean.
+SET me = /joe
+SET heavy = 100
+SET ratio = 2.2
+SET greeting = "Joe"
+SET yes = true
+select ?n where me name ?n
+select ?p where ?p name greeting
+select ?p, ?m / ratio as ?kg by ?p where ?p mass_lbs ?m
+select ?p where ?p mass_lbs ?m . ?m > heavy
+insert me active yes
+select ?p where ?p active true
+-- A string is the value, even with a symbol's name.
+select ?p where ?p name "greeting"
+
+-- A graph of its own links: nothing of the database's, unless layered
+-- over it.
+SET friends = { /billy knows /will . /will knows /joe }
+select ?x, ?y by ?x, ?y from graph friends where ?x knows ?y
+-- Layered: the links of both, the upper's replacing the lower's.
+SET all = database:friends
+select ?x, ?y by ?x, ?y from graph all where ?x knows ?y
+-- A negated triple deletes a fact beneath.
+select ?x, ?y by ?x, ?y from graph all:{ not /ann knows /billy } where ?x knows ?y
+-- Paths and rules read a graph as they read the database.
+select ?y from graph all where /joe knows++ ?y
+
+-- A lookup's graph, named: its links, and those it asserts or derives.
+SET alive = graph ( lookup ?p a person . ?p is_alive true! )
+select ?p from graph alive where ?p is_alive true
+verify /ann is_alive true
+-- Inserted, written: here into the database.
+insert graph alive
+verify /ann is_alive true
+-- A graph's own nodes are new nodes when inserted.
+insert graph { [ a note ; about /ann ] }
+select ?n where ?n a note ; about /ann

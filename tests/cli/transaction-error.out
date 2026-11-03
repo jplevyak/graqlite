@@ -1,0 +1,5 @@
+BEGIN
+INSERT 1
+tests/cli/transaction-error.graql:4: error: a template variable is not bound by the pattern
+the transaction was rolled back
+[exit 1]

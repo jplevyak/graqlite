@@ -1,0 +1,136 @@
+-- The parts of the GraQL tour that run here, corrected.  The rest is in examples/pending/, by issue.
+
+-- Anonymous nodes, two ways that mean the same: each insert makes a new
+-- node named "Billy Bob" with a type.
+insert [] name "Billy Bob" ; a /people/person
+insert [ name "Billy Bob" ] a /people/person
+select ?p, ?n where ?p name ?n ; a /people/person
+
+-- People, and a film graph in Freebase's style: a film's cast are
+-- performance nodes, each linking an actor and the character played.
+insert /woody a /people/person ; name "Woody Allen" ; /people/age 88 .
+       /diane a /people/person ; name "Diane Keaton" ; /people/age 78 .
+       /louise a /people/person ; name "Louise Lasser" ; /people/age 85 .
+       /annie_hall a /film/film ; name "Annie Hall" ;
+         /film/film/directed_by /woody ;
+         /film/film/starring
+           [ /film/performance/actor /woody ; /film/performance/character "Alvy Singer" ] ,
+           [ /film/performance/actor /diane ; /film/performance/character "Annie Hall" ] .
+       /tiger_lily a /film/film ; name "What's Up, Tiger Lily?" ;
+         /film/film/directed_by /woody ;
+         /film/film/starring
+           [ /film/performance/actor /louise ; /film/performance/character "Teri Yaki" ] .
+       /the_godfather a /film/film ; name "The Godfather" ;
+         /film/film/starring
+           [ /film/performance/actor /diane ; /film/performance/character "Kay Adams" ]
+
+-- Lookups return the links their matches use.  A ? is a variable of its
+-- own, so the first two are the same.  A node's key is a link too.
+lookup ?film /film/film/directed_by ?
+lookup ? /film/film/directed_by ?
+lookup /diane ? ?
+
+-- SELECTed results, ordered by an expression.
+select ?name, ?age by ?age where ?person a /people/person ; name ?name ; /people/age ?age
+
+-- Each film's director and actors, through the performance nodes.
+select ?film, ?director, ?actor by ?film, ?actor
+  where ?f name ?film ; /film/film/directed_by [ name ?director ] ;
+        /film/film/starring [ /film/performance/actor [ name ?actor ] ]
+
+-- Directors who act in their own films: the same node at both ends.
+select distinct ?name where ?f /film/film/directed_by ?d ;
+                               /film/film/starring [ /film/performance/actor ?d ] .
+                            ?d name ?name
+
+-- Actors in more than one film, and the characters they played.
+select ?actor, ?character by ?actor, ?character
+  where ?f /film/film/starring [ /film/performance/actor ?a ;
+                                     /film/performance/character ?character ] .
+        ?g /film/film/starring [ /film/performance/actor ?a ] .
+        ?f != ?g . ?a name ?actor
+
+-- A blank node can be named, to use it again: here, the performances
+-- whose actor is the film's director.
+select ?f, ?c where ?f /film/film/directed_by ?d ;
+                       /film/film/starring [ :?p /film/performance/actor ?d ] .
+                    ?p /film/performance/character ?c
+
+-- The tour's Man Booker example: every nomination, by year, and whether it
+-- won.  (The tour's version didn't tie a nomination's year to the win's,
+-- and spelled the prize's key two ways.)
+insert /en/man_booker_prize name "Man Booker Prize" ;
+         /award/award_category/winners
+           [ /award/award_honor/year 1981 ; /award/award_honor/honored_for /midnights_children ] ,
+           [ /award/award_honor/year 1989 ; /award/award_honor/honored_for /the_remains ] ;
+         /award/award_category/nominees
+           [ /award/award_nomination/year 1981 ;
+             /award/award_nomination/award_nominee [ name "Salman Rushdie" ] ;
+             /award/award_nomination/nominated_for /midnights_children ] ,
+           [ /award/award_nomination/year 1981 ;
+             /award/award_nomination/award_nominee [ name "Muriel Spark" ] ;
+             /award/award_nomination/nominated_for /loitering ] ,
+           [ /award/award_nomination/year 1989 ;
+             /award/award_nomination/award_nominee [ name "Kazuo Ishiguro" ] ;
+             /award/award_nomination/nominated_for /the_remains ] ,
+           [ /award/award_nomination/year 1989 ;
+             /award/award_nomination/award_nominee [ name "Margaret Atwood" ] ;
+             /award/award_nomination/nominated_for /cats_eye ] .
+       /midnights_children name "Midnight's Children" .
+       /loitering name "Loitering with Intent" .
+       /the_remains name "The Remains of the Day" .
+       /cats_eye name "Cat's Eye"
+select ?year, ?nominee, ?work, bound(?win) as ?won by ?year, ?nominee
+  where /en/man_booker_prize /award/award_category/nominees [
+          /award/award_nomination/year ?year ;
+          /award/award_nomination/award_nominee [ name ?nominee ] ;
+          /award/award_nomination/nominated_for [ :?w name ?work ] ]
+    and optional ( /en/man_booker_prize /award/award_category/winners [ :?win
+          /award/award_honor/year ?year ; /award/award_honor/honored_for ?w ] )
+
+-- Joins on a comparison, in a lookup: the states with more dogs than
+-- people, and the links that show it.
+insert /state/a /state/population 900 ; /state/dog_population 1000 .
+       /state/b /state/population 500 ; /state/dog_population 20
+lookup ?state /state/population ?population .
+       ?state /state/dog_population ?dogs . ?dogs > ?population
+
+-- Rules are over nodes and evaluate to part of a query; their bodies can
+-- be in braces, and these two are the same rule.
+insert /ann /parent/of /ben . /ben /parent/of /cat , /dan . /eve /parent/of /fay
+rule grandparent(?grandparent ?grandchild) {
+  ?grandparent /parent/of ?parent .
+  ?parent /parent/of ?grandchild
+}
+rule grandparent2(?grandparent ?grandchild) {
+  ?grandparent /parent/of [ /parent/of ?grandchild ]
+}
+select ?g, ?c by ?c where grandparent(?g ?c)
+select ?g, ?c by ?c where grandparent2(?g ?c)
+
+-- A schema as data: properties described by meta nodes, and a rule over
+-- them.  (The tour's PROPERTY rule left ?obj unconnected; here it is the
+-- property's object meta node.)
+insert /film/film/directed_by /b/p/subject_meta [ /b/p/cardinality 0 ] ;
+                              /b/p/object_meta [ /b/p/cardinality 1 ] ;
+                              /b/p/gloss "the film's director" .
+       /film/performance/actor /b/p/subject_meta [ /b/p/cardinality 0 ] ;
+                               /b/p/object_meta [ /b/p/cardinality 0 ] ;
+                               /b/p/gloss "the actor of a performance"
+rule property(?prop ?in ?out ?gloss) {
+  ?prop /b/p/subject_meta [ /b/p/cardinality ?in ] ;
+        /b/p/object_meta [ /b/p/cardinality ?out ] ;
+        /b/p/gloss ?gloss
+}
+select ?prop, ?in, ?out, ?gloss by ?gloss where property(?prop ?in ?out ?gloss)
+-- The single-valued ones.
+select ?prop where property(?prop ? 1 ?)
+
+-- Following a predicate transitively with ++: Ann's descendants.
+select ?d by ?d where /ann /parent/of++ ?d
+
+-- VERIFY checks that a pattern has a match.  A film is directed by its
+-- director, not the other way around.
+verify /woody name ?name
+verify /woody /film/film/directed_by ?film
+verify ?film /film/film/directed_by /woody

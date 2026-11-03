@@ -1,0 +1,37 @@
+-- Path expressions: chains of links, in predicate position, in parentheses.
+
+insert /ann parent /ben . /ben parent /cat . /cat parent /dan .
+       /eve guardian /cat .
+       /ann knows /eve . /eve knows /fay . /fay likes /gus . /eve likes /hal
+
+-- `/` is a sequence: a grandchild.  `knows/likes`, with no spaces, reads
+-- the same: in a path, `/likes` is "then likes", not a key.
+select ?g where /ann (parent / parent) ?g
+
+select ?x where /ann (knows/likes) ?x
+
+-- `^` follows a link backward: /cat's parent.
+select ?p where /cat (^parent) ?p
+
+-- `|` is either: who raised /cat.
+select ?p by ?p where /cat (^parent | ^guardian) ?p
+
+-- `+` is one or more, `*` zero or more, and `{m,n}` between m and n times.
+select ?d by ?d where /ann (parent+) ?d
+
+select ?d by ?d where /ann (parent*) ?d
+
+select ?d by ?d where /ann (parent{2,3}) ?d
+
+-- They combine: anyone liked by someone /ann knows, directly or not.
+select ?x by ?x where /ann (knows+ / likes) ?x
+
+-- Searched from whichever end is known: every ancestor of /dan, through
+-- parents or guardians.
+select ?a by ?a where ?a ((parent | guardian)+) /dan
+
+-- Each pair of ends matches once, however many chains join them.
+select ?x, ?y where ?x (parent{3}) ?y
+
+-- `p++` is the original form of `(p+)`, and allows a variable predicate.
+select ?p, ?d by ?p, ?d where /ann ?p++ ?d

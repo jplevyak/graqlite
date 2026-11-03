@@ -1,0 +1,36 @@
+-- Aggregates: counting, summing and grouping.
+
+insert /ann city paris ; age 41 ; knows /ben , /cat .
+       /ben city rome ; age 17 ; knows /cat .
+       /cat city paris ; age 29 .
+       /dan city oslo ; age 65 ; knows /ann , /ben , /cat .
+       /eve city rome ; age 29 .
+       /fay city paris
+
+-- Rows are grouped by the selected variables that are not aggregated.
+-- `as ?name` names a result, so `by` can order by it (`desc` for the
+-- largest first).
+select ?city, count(?p) as ?people by ?people desc, ?city where ?p city ?city
+
+-- With nothing to group by, there is one row: here, counting the matches
+-- of the pattern, and the distinct cities among them.
+select count(*) as ?matches, count(distinct ?c) as ?cities where ?p city ?c
+
+-- sum and avg read numbers from data; min and max compare values.
+select ?city, avg(?age) as ?mean, min(?age), max(?age) by ?city
+  where ?p city ?city ; age ?age
+
+-- Unbound values (from optional patterns) are skipped, except by count(*).
+select ?city, count(*) as ?people, count(?age) as ?aged by ?city
+  where ?p city ?city ; age ?age -
+
+-- `having` keeps the groups whose results pass.
+select ?p, count(?f) as ?friends having ?friends >= 2 by ?friends desc
+  where ?p knows ?f
+
+-- `limit` applies to the groups, after ordering: the oldest city.
+select ?city, max(?age) as ?oldest by ?oldest desc limit 1
+  where ?p city ?city ; age ?age
+
+-- `desc` works without aggregates too.
+select ?p, ?age by ?age desc limit 3 where ?p age ?age

@@ -1,0 +1,74 @@
+INSERT 11
+SET me
+SET heavy
+SET ratio
+SET greeting
+SET yes
+ n
+-----
+ Joe
+(1 row)
+ p
+------
+ /joe
+(1 row)
+ p      | kg
+--------+-----------
+ /joe   | 81.818182
+ /ann   | 13.636364
+ /billy | 15.909091
+(3 rows)
+ p
+------
+ /joe
+(1 row)
+INSERT 1
+ p
+------
+ /joe
+(1 row)
+ p
+---
+(0 rows)
+SET friends
+ x      | y
+--------+-------
+ /billy | /will
+ /will  | /joe
+(2 rows)
+SET all
+ x      | y
+--------+--------
+ /joe   | /ann
+ /ann   | /billy
+ /billy | /will
+ /will  | /joe
+(4 rows)
+ x      | y
+--------+-------
+ /joe   | /ann
+ /billy | /will
+ /will  | /joe
+(3 rows)
+ y
+--------
+ /joe
+ /ann
+ /billy
+ /will
+(4 rows)
+SET alive
+ p
+--------
+ /joe
+ /ann
+ /billy
+(3 rows)
+false
+INSERT 3
+true
+INSERT 2
+ n
+------
+ #350
+(1 row)

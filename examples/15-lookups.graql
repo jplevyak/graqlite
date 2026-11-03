@@ -1,0 +1,55 @@
+-- Lookups and the shorter forms of patterns from the GraQL tour:
+-- subjects and predicates on their own, lookup ... where, directions and
+-- chains of predicates, and tests of objects.
+
+insert /joe a person ; name "Joe" ; mass_lbs 180 .
+       /ann a person ; name "Ann" ; mass_lbs 30 ; a /people/woman .
+       /billy a person ; name "Billy Bob" ; mass_lbs 35 .
+       /will a person ; name "Will" .
+       /ann pet /rex . /billy pet /tom , /fido .
+       /state/a /state/population 900 ; /state/dog_population 1000 .
+       /state/b /state/population 500 ; /state/dog_population 20 .
+       /woody a /people/person ; name "Woody Allen" .
+       /annie_hall /film/film/directed_by /woody ;
+         /film/film/starring [ /film/performance/actor /woody ] .
+       /tiger_lily /film/film/directed_by /woody ;
+         /film/film/starring [ /film/performance/actor /louise ]
+
+-- A predicate needn't have an object: any object will do.  These are the
+-- type links, and those who have pets.
+lookup ? a
+select distinct ?p by ?p where ?p pet
+
+-- A subject needn't have predicates.  In a lookup it returns the nodes it
+-- binds; with nothing else to bind it, every node in a link.
+lookup [ a ; name ]
+
+-- lookup ... where returns the pattern's matches, constrained by the where
+-- part, whose own links aren't returned: here, just the nodes.
+lookup ?s where ?s mass_lbs ?m . ?m < 100
+lookup ?s pet ?p where ?s name "Billy Bob"
+
+-- << reverses a predicate, and after objects continues from the last of
+-- them; >> continues forward.  So this is each film Woody directed, and
+-- its performances.
+lookup /woody << /film/film/directed_by ?film >> /film/film/starring ?p
+-- ! reverses one predicate, of the same subject.
+select ?film by ?film where /woody !/film/film/directed_by ?film
+-- + after objects is the default, mandatory; - makes the predicate optional.
+select ?n, ?pet by ?n, ?pet where ?p name ?n + ; pet ?pet -
+
+-- A blank node can be a comparison: a pet that isn't /rex, a mass below 32.
+select ?p, ?o by ?p, ?o where ?p pet [ :?o != /rex ]
+select ?p where ?p mass_lbs [ < 32 ]
+
+-- An object in parentheses is a test of it, its left side left out.
+select ?p by ?p where ?p mass_lbs (< 40)
+select ?p by ?p where ?p a person and ( ?p name (< "Joe") or ?p name (> "Will") )
+-- ~ matches a regular expression anywhere in the text, and a test function
+-- takes the object as its first argument.
+select ?p where ?p name (~"Bob.*")
+select ?p where ?p name (PREFIX("Bil"))
+-- A comparison with another variable is a join.
+select ?s where ?s /state/population ?pop ; /state/dog_population (> ?pop)
+-- ( :?x test ) names the object.
+select ?p, ?m where ?p mass_lbs ( :?m > 100 )

@@ -1,0 +1,2 @@
+tests/cli/unsupported.graql:1:25: error: 'implies' is not supported
+[exit 1]

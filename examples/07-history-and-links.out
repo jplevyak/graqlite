@@ -1,0 +1,52 @@
+INSERT 2
+INSERT 2
+ who  | year
+------+------
+ /ben | 2019
+(1 row)
+showing ids is on
+ who      | l
+----------+-----
+ /ben #39 | #58
+ /cat #71 | #90
+(2 rows)
+showing ids is off
+INSERT 2
+ who  | year | s
+------+------+----------
+ /cat | 2021 | /letters
+(1 row)
+DELETE 1
+INSERT 1
+ who
+------
+ /ben
+ /dan
+(2 rows)
+ who
+------
+ /ben
+ /cat
+(2 rows)
+true
+ who
+------
+ /cat
+(1 row)
+DELETE 1
+ p     | o
+-------+------
+ since | 2019
+(1 row)
+#236 node /dan
+committed 2026-10-31T12:00:00Z
+links in (1):
+  /ann knows
+ who
+-----
+(0 rows)
+ who
+------
+ /ben
+ /dan
+(2 rows)

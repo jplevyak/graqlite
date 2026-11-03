@@ -1,0 +1,2 @@
+-- A rule is checked before it is saved.
+rule r(?x) ?x p 1 or ?y q 2

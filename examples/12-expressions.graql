@@ -1,0 +1,35 @@
+-- Expressions: computing with values.  Values are stored as untyped bytes;
+-- computation is typed, converting as it needs: text that is a number is a
+-- number, and an entry is its data (or key) as text.
+
+insert /ann name Ann ; price 12 ; qty 10 ; city paris ; email "ann@example.com" .
+       /ben name Ben ; price 3.5 ; qty 2 ; city rome .
+       /cat name Cat ; price 40 ; qty 3 ; city paris
+
+-- Arithmetic in the select list, named with `as`: integers stay integers,
+-- `/` divides to a float.
+select ?n, ?p * ?q as ?total, ?p / 2 as ?half by ?total desc
+  where ?x name ?n ; price ?p ; qty ?q
+
+-- A comparison of expressions filters rows, anywhere in a pattern.
+select ?n by ?n where ?x name ?n ; price ?p ; qty ?q . ?p * ?q >= 100
+
+-- `let ?v = expr` names a value, for later expressions and the results.
+select ?n, ?total by ?n
+  where ?x name ?n ; price ?p ; qty ?q . let ?total = ?p * ?q . ?total < 200
+
+-- Text: case, length, concatenation, and tests (contains, starts, ends).
+select upper(?n), length(?c), concat(?n, " of ", ?c) by ?n
+  where ?x name ?n ; city ?c . contains(?c, "ar")
+
+-- bound() tests optional values; a computation with an unbound value is
+-- unbound.
+select ?n, bound(?e), length(?e) by ?n where ?x name ?n ; email ?e -
+
+-- Aggregates take expressions: revenue by city.
+select ?c, sum(?p * ?q) as ?revenue by ?revenue desc where ?x city ?c ; price ?p ; qty ?q
+
+-- Links' times: when(?l) is when a link was made, and iso() writes a time.
+select ?n where << :?l ?x name ?n >> . when(?l) > time("2000-01-01")
+
+select iso(time("2026-10-31T14:30:00+02:00")) as ?utc where /ann name ?n

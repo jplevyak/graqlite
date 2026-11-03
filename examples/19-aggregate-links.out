@@ -1,0 +1,77 @@
+INSERT 6
+ link | subject | predicate           | object | derived
+------+---------+---------------------+--------+--------------------------
+ #77  | /ann    | /parent/of          | /ben   |
+ #109 | /ben    | /parent/of          | /cat   |
+ #141 | /ben    | /parent/of          | /dan   |
+      | /ann    | number_of_grandkids | 2      | count from #77 #109 #141
+(4 rows)
+ link | subject | predicate      | object | derived
+------+---------+----------------+--------+--------------------------
+ #77  | /ann    | /parent/of     | /ben   |
+ #109 | /ben    | /parent/of     | /cat   |
+ #141 | /ben    | /parent/of     | /dan   |
+      | /ben    | number_of_kids | 2      | count from #77 #109 #141
+(4 rows)
+ link | subject | predicate | object | derived
+------+---------+-----------+--------+----------------------
+ #206 | /dan    | pet       | /rex   |
+ #240 | /dan    | pet       | /felix |
+      | /dan    | pets      | 4      | count from #206 #240
+(3 rows)
+ link | subject | predicate | object | derived
+------+---------+-----------+--------+----------------------
+ #206 | /dan    | pet       | /rex   |
+ #240 | /dan    | pet       | /felix |
+      | /dan    | pets      | 2      | count from #206 #240
+(3 rows)
+INSERT 13
+RULE current_spouse
+ p    | s
+------+------
+ /ann | /cy
+ /bob | /dee
+ /cy  | /ann
+ /dee | /bob
+(4 rows)
+INSERT 12
+ m     | from | r
+-------+------+---
+ #972  | 2010 | 0
+ #1073 | 2010 | 0
+ #1150 | 2001 | 2
+(3 rows)
+ from | r
+------+---
+ 2010 | 0
+ 2010 | 0
+ 2001 | 1
+(3 rows)
+ from | r
+------+---
+ 2010 | 0
+ 2010 | 1
+ 2001 | 2
+(3 rows)
+ from | r
+------+---
+ 2010 | 0
+ 2010 | 0
+ 2001 | 2
+(3 rows)
+INSERT 7
+ o    | r
+------+---
+ /jan | 0
+ /ivy | 1
+(2 rows)
+ o    | r
+------+---
+ /jan | 0
+ /ivy | 1
+(2 rows)
+INSERT 1
+ o
+------
+ /jan
+(1 row)

@@ -1,0 +1,56 @@
+INSERT 2
+DEFAULT
+ g
+-----------------------
+ "the film's director"
+(1 row)
+SET film_stuff
+SET film_stuff
+ f
+-------------
+ /tiger_lily
+ /bananas
+(2 rows)
+ g
+-----------------------
+ "the film's director"
+(1 row)
+SET without
+ f
+----------
+ /bananas
+(1 row)
+DATA
+INSERT 1
+ f
+----------
+ /sleeper
+(1 row)
+DATA
+ f
+-------------
+ /annie_hall
+(1 row)
+SET more
+ f
+-------------
+ /annie_hall
+ /bananas
+(2 rows)
+ASSUME 1
+ y
+------
+ 1935
+(1 row)
+true
+DEFAULT
+ g
+---
+(0 rows)
+RULE PROPERTY
+DEFAULT
+ p                       | c
+-------------------------+---
+ /film/film/directed_by  | 1
+ /film/performance/actor | 0
+(2 rows)

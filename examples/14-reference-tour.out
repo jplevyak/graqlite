@@ -1,0 +1,97 @@
+INSERT 2
+INSERT 2
+ p   | n
+-----+-------------
+ #1  | "Billy Bob"
+ #90 | "Billy Bob"
+(2 rows)
+INSERT 29
+ link | subject     | predicate              | object
+------+-------------+------------------------+--------
+ #498 | /annie_hall | /film/film/directed_by | /woody
+ #800 | /tiger_lily | /film/film/directed_by | /woody
+(2 rows)
+ link | subject     | predicate              | object
+------+-------------+------------------------+--------
+ #498 | /annie_hall | /film/film/directed_by | /woody
+ #800 | /tiger_lily | /film/film/directed_by | /woody
+(2 rows)
+ link | subject | predicate      | object
+------+---------+----------------+----------------
+ #226 | /diane  | "graqlite:key" | "/diane"
+ #239 | /diane  | type           | /people/person
+ #265 | /diane  | name           | "Diane Keaton"
+ #281 | /diane  | /people/age    | 78
+(4 rows)
+ name            | age
+-----------------+-----
+ "Diane Keaton"  | 78
+ "Louise Lasser" | 85
+ "Woody Allen"   | 88
+(3 rows)
+ film                     | director      | actor
+--------------------------+---------------+-----------------
+ "Annie Hall"             | "Woody Allen" | "Diane Keaton"
+ "Annie Hall"             | "Woody Allen" | "Woody Allen"
+ "What's Up, Tiger Lily?" | "Woody Allen" | "Louise Lasser"
+(3 rows)
+ name
+---------------
+ "Woody Allen"
+(1 row)
+ actor          | character
+----------------+--------------
+ "Diane Keaton" | "Annie Hall"
+ "Diane Keaton" | "Kay Adams"
+(2 rows)
+ f           | c
+-------------+---------------
+ /annie_hall | "Alvy Singer"
+(1 row)
+INSERT 31
+ year | nominee           | work                     | won
+------+-------------------+--------------------------+-------
+ 1981 | "Muriel Spark"    | "Loitering with Intent"  | false
+ 1981 | "Salman Rushdie"  | "Midnight's Children"    | true
+ 1989 | "Kazuo Ishiguro"  | "The Remains of the Day" | true
+ 1989 | "Margaret Atwood" | "Cat's Eye"              | false
+(4 rows)
+INSERT 4
+ link  | subject  | predicate             | object
+-------+----------+-----------------------+--------
+ #2125 | /state/a | /state/population     | 900
+ #2179 | /state/a | /state/dog_population | 1000
+(2 rows)
+INSERT 4
+RULE grandparent
+RULE grandparent2
+ g    | c
+------+------
+ /ann | /cat
+ /ann | /dan
+(2 rows)
+ g    | c
+------+------
+ /ann | /cat
+ /ann | /dan
+(2 rows)
+INSERT 10
+RULE property
+ prop                    | in | out | gloss
+-------------------------+----+-----+------------------------------
+ /film/performance/actor | 0  | 0   | "the actor of a performance"
+ /film/film/directed_by  | 0  | 1   | "the film's director"
+(2 rows)
+ prop
+------------------------
+ /film/film/directed_by
+(1 row)
+ d
+------
+ /ben
+ /cat
+ /dan
+(3 rows)
+true
+false
+true

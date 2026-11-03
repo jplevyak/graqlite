@@ -1,0 +1,17 @@
+insert /a knows /b ; age 30 ; name "two words"
+
+\show /a
+\show "two words"
+\show knows
+\ids
+select ?x where /a knows ?x
+\ids
+\format tsv
+select ?n where /a name ?n
+\format
+\format aligned
+\dS
+\explain verify /a knows /b
+\info
+\i tests/cli/include/part.graql
+\nonsense

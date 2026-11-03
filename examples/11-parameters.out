@@ -1,0 +1,43 @@
+INSERT 8
+ f    | age
+------+-----
+ /cat | 29
+ /eve | 41
+ /dan | 65
+(3 rows)
+ parameter | value
+-----------+-------
+ $min      | 21
+ $who      | /ann
+(2 rows)
+showing ids is on
+ f
+-----------
+ /ben #39
+ /cat #71
+ /dan #103
+ /eve #135
+(4 rows)
+showing ids is off
+ a
+----
+ 17
+(1 row)
+ f
+------
+ /ben
+ /cat
+(2 rows)
+ f
+------
+ /dan
+ /eve
+(2 rows)
+INSERT 4
+ t
+-----
+ x
+ 100
+ 10
+ 9
+(4 rows)

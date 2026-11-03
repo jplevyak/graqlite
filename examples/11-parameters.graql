@@ -1,0 +1,30 @@
+-- Parameters, entries by id, and paging.
+
+insert /ann knows /ben , /cat , /dan , /eve .
+       /ben age 17 . /cat age 29 . /dan age 65 . /eve age 41
+
+-- `$name` is a parameter, set in the shell with \set (or `graqlite -v
+-- name=value`), and in the library with Session::run_with.  Its value is a
+-- /key, a #id or a value, never GraQL text, so it can't change the query.
+\set who /ann
+\set min 21
+select ?f, ?age by ?age where $who knows ?f . ?f age ?age . ?age >= $min
+
+\set
+\unset min
+
+-- `#id` is the entry with that id, as \ids shows it.
+\ids
+select ?f where /ann knows ?f
+\ids
+select ?a where #39 age ?a
+
+-- `offset` skips rows after ordering, for paging with `limit`.
+select ?f by ?f limit 2 where /ann knows ?f
+
+select ?f by ?f limit 2 offset 2 where /ann knows ?f
+
+-- `by` orders numbers by value (so 9 before 10), then other data.
+insert /eve tag 9 , 10 , 100 , x
+
+select ?t by ?t desc where /eve tag ?t

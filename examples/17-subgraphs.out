@@ -1,0 +1,81 @@
+INSERT 8
+INSERT 1
+ x    | y
+------+------
+ /ann | /cat
+(1 row)
+ x    | y
+------+------
+ /ann | /ben
+ /ann | /cat
+ /ben | /cat
+ /cat | /dan
+(4 rows)
+ link | subject | predicate | object
+------+---------+-----------+--------
+ #235 | /ann    | knows     | /cat
+(1 row)
+false
+INSERT 1
+ g
+---------------
+ old_friends
+ paris_friends
+(2 rows)
+DELETE 1
+true
+true
+DELETE 1
+false
+INSERT 1
+true
+AUTHOR /author/john
+SUBGRAPH /author/john
+INSERT 1
+ link | subject | predicate | object
+------+---------+-----------+--------
+ #354 | /ann    | likes     | /dan
+(1 row)
+ link | subject | predicate | object
+------+---------+-----------+--------
+ #354 | /ann    | likes     | /dan
+(1 row)
+ s    | o
+------+------
+ /ann | /dan
+(1 row)
+INSERT 1
+ p
+------
+ /ann
+(1 row)
+ link | subject | predicate        | object
+------+---------+------------------+--------
+ #405 | /ann    | /u/321/pet_lover | true
+(1 row)
+ x
+------
+ /dan
+(1 row)
+INSERT 1
+ x    | y
+------+------
+ /dan | /ann
+(1 row)
+MAINTAIN neighbours (+0 -0)
+ x | y
+---+---
+(0 rows)
+INSERT 2
+DELETE 2
+ x    | y
+------+------
+ /ann | /ben
+(1 row)
+ subgraph     | links
+--------------+-------
+ /author/john | 4
+ old_friends  | 1
+ archive      | 1
+ neighbours   | 1
+(4 rows)

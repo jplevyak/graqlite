@@ -1,0 +1,3 @@
+INSERT 1
+tests/cli/syntax-error.graql:5:10: error: expected a statement, found ')'
+[exit 1]

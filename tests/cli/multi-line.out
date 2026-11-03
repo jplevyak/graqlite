@@ -1,0 +1,10 @@
+INSERT 3
+ n
+----------------------------
+ "first line\n\nthird line"
+(1 row)
+true
+ x
+----
+ /a
+(1 row)

@@ -1,0 +1,57 @@
+-- A session reads and writes its data graph, the database unless DATA
+-- sets another; every graph it reads is over the default graph; and links
+-- it ASSUMEs are seen until its transaction ends.  None of these is
+-- written.
+
+insert /annie_hall /film/film/directed_by /woody . /woody name "Woody Allen"
+
+-- A default graph, which every graph is layered over: here, a schema.
+DEFAULT { /film/film/directed_by gloss "the film's director" ; cardinality 1 }
+select ?g where /film/film/directed_by gloss ?g
+
+-- Graphs over a base: film_stuff's links, then more.  A named graph sees
+-- only its own links (over the default graph), not the database's.
+SET film_stuff = { /tiger_lily /film/film/directed_by /woody }
+SET film_stuff = film_stuff:{ /bananas /film/film/directed_by /woody }
+select ?f by ?f from graph film_stuff where ?f /film/film/directed_by /woody
+select ?g from graph film_stuff where /film/film/directed_by gloss ?g
+
+-- An overlay can delete a fact of its base, for whatever reads through it.
+SET without = film_stuff:{ not /tiger_lily /film/film/directed_by /woody }
+select ?f by ?f from graph without where ?f /film/film/directed_by /woody
+
+-- A scratch data graph: work that is never written.
+DATA {}
+insert /sleeper /film/film/directed_by /woody
+select ?f where ?f /film/film/directed_by /woody
+-- The reserved name database is the stored graph, as the data graph and
+-- as a base.
+DATA database
+select ?f where ?f /film/film/directed_by /woody
+SET more = database:{ /bananas /film/film/directed_by /woody }
+select ?f by ?f from graph more where ?f /film/film/directed_by /woody
+
+-- Assumed links: seen in every graph read until the transaction ends
+-- (here, outside a \begin transaction, until the session ends), never
+-- written.
+ASSUME /woody born 1935
+select ?y where /woody born ?y
+verify /woody born 1935 in graph database
+
+-- Setting the default at the end does nothing for the statements before.
+DEFAULT {}
+select ?g where /film/film/directed_by gloss ?g
+
+-- A default graph of properties: calls of a template rule, whose triples
+-- are the graph's, a new meta node for each property.  (Corrected from the
+-- tour: the object's meta node is the property's own.)
+rule PROPERTY(?prop ?in ?out ?gloss) {
+  ?prop /b/p/subject_meta [ /b/p/cardinality ?in ] ! .
+  ?prop /b/p/object_meta [ /b/p/cardinality ?out ] ! .
+  ?prop /b/p/gloss ?gloss !
+}
+DEFAULT {
+  PROPERTY(/film/performance/actor 0 0 "").
+  PROPERTY(/film/film/directed_by 1 0 "the film's director").
+}
+select ?p, ?c by ?p where ?p /b/p/subject_meta ?m . ?m /b/p/cardinality ?c

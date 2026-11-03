@@ -1,0 +1,47 @@
+INSERT 3
+#1 node /a
+committed 2026-10-31T12:00:00Z
+links out (3):
+  knows /b
+  age 30
+  name "two words"
+#92 value "two words"
+committed 2026-10-31T12:00:00Z
+links in (1):
+  /a name
+#31 value knows
+committed 2026-10-31T12:00:00Z
+predicate of 1 live links
+showing ids is on
+ x
+--------
+ /b #37
+(1 row)
+showing ids is off
+output format is tsv
+n
+two words
+output format is tsv
+output format is aligned
+ predicate      | links | subjects | objects
+----------------+-------+----------+---------
+ "graqlite:key" | 2     | ~2       | ~2
+ knows          | 1     | ~1       | ~1
+ age            | 1     | ~1       | ~1
+ name           | 1     | ~1       | ~1
+(4 rows)
+scan (/a knows /b) via spo index, rows ~1
+limit 1
+database:     in memory
+ids:          1 to 115
+history:      1 commit, 2026-10-31T12:00:00Z to 2026-10-31T12:00:00Z
+links:        5 live, 0 deleted
+predicates:   4
+rules:        0
+transaction:  none
+ a
+----
+ 30
+(1 row)
+tests/cli/commands.graql:17: error: unknown command \nonsense; try \?
+[exit 1]

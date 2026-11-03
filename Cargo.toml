@@ -1,0 +1,40 @@
+[package]
+name = "graqlite"
+version = "0.1.0"
+edition = "2024"
+description = "A lightweight graph database built on an append-only record log"
+
+[dependencies]
+libc = "0.2.191"
+regex-lite = "0.1.9"
+rustyline = { version = "19.0.0", optional = true }
+sha2 = "0.10.9"
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "record_log"
+harness = false
+
+[[bench]]
+name = "index"
+harness = false
+
+[[bench]]
+name = "lookups"
+harness = false
+
+[[bench]]
+name = "graql"
+harness = false
+
+[features]
+default = ["cli"]
+# The `graqlite` command line shell.
+cli = ["dep:rustyline"]
+
+[[bin]]
+name = "graqlite"
+path = "src/bin/graqlite/main.rs"
+required-features = ["cli"]

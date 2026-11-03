@@ -1,0 +1,21 @@
+-- insert and delete with templates: once, or for each match of a pattern.
+
+insert /ann knows /ben , /cat .
+       /ben knows /cat
+
+-- For each match of the pattern, insert the template.  This makes knows
+-- symmetric.
+insert ?y knows ?x where ?x knows ?y
+
+select ?x, ?y by ?x, ?y where ?x knows ?y
+
+-- A blank node in a template is a new node for each match: here, a new
+-- friendship node for each person /ann knows.
+insert _:f a friendship ; between /ann , ?y where /ann knows ?y
+
+select ?other by ?other where ?f a friendship ; between ?other . ?other != /ann
+
+-- delete with a pattern removes the matching links.
+delete ?x knows ?y where ?x knows ?y . ?y knows ?x . ?x = /cat
+
+select ?x, ?y by ?x, ?y where ?x knows ?y

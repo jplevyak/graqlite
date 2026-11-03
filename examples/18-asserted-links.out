@@ -1,0 +1,76 @@
+INSERT 7
+ link | subject | predicate | object       | derived
+------+---------+-----------+--------------+--------------------
+ #170 | /ann    | name      | "John Smith" |
+ #183 | /dan    | name      | "John Smith" |
+      | /ann    | is_alive  | true         | asserted from #170
+      | /dan    | is_alive  | true         | asserted from #183
+(4 rows)
+false
+ link | subject | predicate | object       | derived
+------+---------+-----------+--------------+-------------------------
+ #170 | /ann    | name      | "John Smith" |
+ #183 | /dan    | name      | "John Smith" |
+ #219 | /dan    | pet       | /rex         |
+ #253 | /dan    | pet       | /felix       |
+      | /dan    | pet_lover | true         | asserted from #183 #219
+(5 rows)
+ link | subject | predicate | object       | derived
+------+---------+-----------+--------------+-------------------------
+ #170 | /ann    | name      | "John Smith" |
+ #183 | /dan    | name      | "John Smith" |
+ #219 | /dan    | pet       | /rex         |
+ #253 | /dan    | pet       | /felix       |
+      | /ann    | pet_lover | true         | asserted from #170
+      | /dan    | pet_lover | true         | asserted from #183 #219
+(6 rows)
+ link | subject | predicate  | object       | derived
+------+---------+------------+--------------+-------------------------
+ #170 | /ann    | name       | "John Smith" |
+ #183 | /dan    | name       | "John Smith" |
+ #219 | /dan    | pet        | /rex         |
+ #253 | /dan    | pet        | /felix       |
+      | /dan    | pet_record | _:1          | asserted from #183 #219
+      | _:1     | animal     | /rex         | asserted from #183 #219
+      | /dan    | pet_record | _:2          | asserted from #183 #253
+      | _:2     | animal     | /felix       | asserted from #183 #253
+(8 rows)
+ link | subject | predicate | object
+------+---------+-----------+--------------
+ #183 | /dan    | name      | "John Smith"
+ #219 | /dan    | pet       | /rex
+ #253 | /dan    | pet       | /felix
+(3 rows)
+RULE grandparent
+ link | subject | predicate       | object | derived
+------+---------+-----------------+--------+--------------------------------
+ #77  | /ann    | /parent/of      | /ben   |
+ #109 | /ben    | /parent/of      | /cat   |
+ #141 | /ben    | /parent/of      | /dan   |
+      | /ann    | grandparent     | /cat   | rule grandparent from #77 #109
+      | /cat    | has_grandparent | true   | rule grandparent from #77 #109
+      | /ann    | grandparent     | /dan   | rule grandparent from #77 #141
+      | /dan    | has_grandparent | true   | rule grandparent from #77 #141
+(7 rows)
+INSERT 4
+ pet
+--------
+ /rex
+ /felix
+(2 rows)
+INSERT 20
+ link  | subject              | predicate                             | object                  | derived
+-------+----------------------+---------------------------------------+-------------------------+------------------------------------------------------
+ #726  | #682                 | /award/award_honor/year               | 1981                    |
+ #818  | #682                 | /award/award_honor/honored_for        | /midnights_children     |
+ #876  | /en/man_booker_prize | /award/award_category/winners         | #682                    |
+ #1010 | #966                 | /award/award_nomination/year          | 1981                    |
+ #1172 | #966                 | /award/award_nomination/nominated_for | /midnights_children     |
+ #1232 | /en/man_booker_prize | /award/award_category/nominees        | #966                    |
+ #1248 | #1247                | /award/award_nomination/year          | 1981                    |
+ #1330 | #1247                | /award/award_nomination/nominated_for | /loitering              |
+ #1344 | /en/man_booker_prize | /award/award_category/nominees        | #1247                   |
+ #1379 | /midnights_children  | name                                  | "Midnight's Children"   |
+ #1416 | /loitering           | name                                  | "Loitering with Intent" |
+       | /midnights_children  | is_winner                             | /en/man_booker_prize    | asserted from #726 #818 #876 #1010 #1172 #1232 #1379
+(12 rows)

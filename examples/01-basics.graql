@@ -1,0 +1,31 @@
+-- Basics: nodes with keys, values, links, and the four kinds of statement.
+--
+-- `/alice` is the node with the key /alice, created when first inserted.
+-- `knows`, `age` and `30` are values: interned data, so each is stored once.
+
+insert /alice knows /bob .
+       /alice age 30 .
+       /bob age 25 .
+       /bob name "Bob Jones"
+
+-- select returns rows of variables.
+select ?who where /alice knows ?who
+
+select ?person, ?age where ?person age ?age
+
+-- verify says whether a pattern has a match.
+verify /alice knows /bob
+
+verify /bob knows /alice
+
+-- lookup returns the links a pattern's matches use.
+lookup /alice knows ?x
+
+-- delete removes links; the history stays in the log.
+delete /bob name "Bob Jones"
+
+-- A key is itself a link, by the predicate graqlite:key.
+select * where /bob ?p ?o
+
+-- \show describes an entry and its live links.
+\show /alice

@@ -1,0 +1,31 @@
+-- Comparisons, and, or, not, ordering and limits.
+
+insert /ann a person ; age 41 ; city paris .
+       /ben a person ; age 17 ; city rome .
+       /cat a person ; age 29 ; city paris .
+       /dan a person ; age 65 ; city oslo .
+       /eve a person ; age 29 ; city rome
+
+-- <, <=, > and >= compare data: numerically when both sides are numbers.
+select ?p, ?age by ?age where ?p age ?age . ?age >= 29
+
+-- `by` orders rows by the data of its variables, and `limit` keeps the first.
+select ?p, ?age by ?age limit 2 where ?p age ?age
+
+-- Strings compare by bytes.
+select ?p, ?c by ?c where ?p city ?c . ?c < "q"
+
+-- = and != compare entries.
+select ?a, ?b where ?a city ?c . ?b city ?c . ?a != ?b . ?a age ?n . ?n > 40
+
+-- `or` needs both branches to bind the same variables.
+select ?p by ?p where ?p city paris or ?p city oslo
+
+-- `not` holds where the pattern has no match.
+select ?p by ?p where ?p a person and not ( ?p city rome )
+
+-- A negated predicate is short for the same.
+select ?p by ?p where ?p a person ; not city paris
+
+-- `distinct` removes duplicate rows.
+select distinct ?c by ?c where ? city ?c

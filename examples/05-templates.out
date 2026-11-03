@@ -1,0 +1,25 @@
+INSERT 3
+INSERT 3
+ x    | y
+------+------
+ /ann | /ben
+ /ann | /cat
+ /ben | /ann
+ /ben | /cat
+ /cat | /ann
+ /cat | /ben
+(6 rows)
+INSERT 6
+ other
+-------
+ /ben
+ /cat
+(2 rows)
+DELETE 2
+ x    | y
+------+------
+ /ann | /ben
+ /ann | /cat
+ /ben | /ann
+ /ben | /cat
+(4 rows)

@@ -1,0 +1,12 @@
+insert /a parent /b
+
+rule ancestor(?x ?y) ?x parent ?y
+
+-- A statement may see the past, rules included: before the link, and
+-- after it (an id after every entry sees the present).
+select ?y as of 1 where ancestor(/a ?y)
+
+select ?y as of 1000000 where ancestor(/a ?y)
+
+-- A group may not call a rule.
+select ?y where ( ancestor(/a ?y) ) as of 1000000
