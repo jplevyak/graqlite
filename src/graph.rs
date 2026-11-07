@@ -52,7 +52,7 @@
 //!
 //! Ids increase as entries are appended, so an id is also a time: queries
 //! taking `as_of` see the graph as it was when that id was appended.  Each
-//! commit also records its wall-clock time (see [`times`](crate::times)),
+//! commit also records its wall-clock time (see [`times`]),
 //! so [`id_at_time`](Graph::id_at_time) gives the last id committed at a
 //! time, and [`time_of`](Graph::time_of) the time an id was committed.
 //!

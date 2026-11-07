@@ -4498,7 +4498,7 @@ fn bind_graph(e: &mut GraphExpr, params: &Params) -> Result<()> {
     }
 }
 
-/// Runs statements, keeping the [rules saved](saved) in the graph they run
+/// Runs statements, keeping the [rules saved](RULES_KEY) in the graph they run
 /// on, read again when they change (by another session, a rollback, ...).
 #[derive(Debug, Clone, Default)]
 pub struct Session {

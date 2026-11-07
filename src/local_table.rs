@@ -1,5 +1,5 @@
 //! An index from ids or [`Uuid`]s to sets of ids, stored in a
-//! [`dynamic_table`](crate::dynamic_table).
+//! [`dynamic_table`].
 //!
 //! A dynamic table key holds any
 //! number of values, and an in-memory dynamic table serves transient indexes.

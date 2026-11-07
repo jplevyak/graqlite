@@ -1885,7 +1885,7 @@ impl Plan {
     /// entry (`Cell::Id`) is that entry wherever it is used.  One given
     /// another value, such as text or a number, is in a pattern the entry
     /// with that data, if there is one (else it matches nothing), and in an
-    /// expression ([`Filter::Holds`](super::Filter::Holds), a computed value,
+    /// expression ([`Filter::Holds`], a computed value,
     /// `having`) the value itself, which need not be in the graph: `?age >=
     /// $min` holds for `min` = 21 by comparing numbers.
     pub fn execute_values<'g>(&self, g: &'g Graph, values: &[Cell]) -> Rows<'g> {

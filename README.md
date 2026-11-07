@@ -600,7 +600,7 @@ python3 scripts/check-links.py   # the Markdown files' relative links
 The library needs Rust 1.88 or later (`rust-version` in `Cargo.toml`). The
 shell's line editor, rustyline 19, needs 1.95, so on an older toolchain build
 the library alone with `--no-default-features`. CI (`.github/workflows/ci.yml`)
-runs the formatting, clippy and link checks, the tests on Linux and macOS, and
+runs the formatting, clippy, docs and link checks, the tests on Linux and macOS, and
 both minimum toolchains. [`BENCHMARKS.md`](BENCHMARKS.md) records the
 benchmarks' numbers on one machine, to compare a change with.
 
