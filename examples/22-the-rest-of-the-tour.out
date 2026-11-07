@@ -32,6 +32,17 @@ INSERT 23
  #643 | #604        | /film/performance/actor | /woody
  #691 | /annie_hall | /film/film/starring     | #604
 (3 rows)
+ p      | pet
+--------+-------
+ /ann   | /rex
+ /billy | /tom
+ /billy | /fido
+(3 rows)
+ p      | pet
+--------+------
+ /ann   | /rex
+ /billy | /tom
+(2 rows)
 FUNCTION foo
  three
 -------
@@ -81,5 +92,5 @@ INSERT 6
  /film/film/starring     | 0
 (2 rows)
 TEST "two lookups of Woody Allen's films agree" passed
-examples/22-the-rest-of-the-tour.graql:71: error: TEST "these differ" failed: the results differ
+examples/22-the-rest-of-the-tour.graql:77: error: TEST "these differ" failed: the results differ
 [exit 1]

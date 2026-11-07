@@ -684,7 +684,13 @@ fn write_statement(
                 if let Some(id) = as_of {
                     write!(f, " as of {id}")?;
                 }
-                write!(f, "{} where {pattern}", from("from"))
+                // A nested limit ending the pattern would be read back as
+                // the statement's: in parentheses, it isn't.
+                if pattern.ends_with_limit() {
+                    write!(f, "{} where ( {pattern} )", from("from"))
+                } else {
+                    write!(f, "{} where {pattern}", from("from"))
+                }
             }
             Statement::Verify { pattern, as_of } => match as_of {
                 Some(id) => write!(f, "verify as of {id} {pattern}{}", from("in")),

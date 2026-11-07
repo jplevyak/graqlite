@@ -31,6 +31,11 @@
 //!   ascending or `desc`ending: numbers by value, then other data, then
 //!   entries without data by id.  `limit` and `offset` (in either order)
 //!   keep some of the rows, after ordering; `limit` limits only on predicates.
+//!   As in SQL, `by`, `limit` and `offset` may instead end the statement,
+//!   after the pattern: `select ?c where ?p city ?c by ?c limit 3`.  A
+//!   limit ending the pattern is the statement's, and a nested limit there
+//!   is written in parentheses (below).  Each goes in one place or the
+//!   other.
 //! - Aggregates: a column may be `count(?x)`, `count(distinct ?x)`,
 //!   `count(*)`, `sum`, `avg`, `min`, `max` or `sample`, named with `as ?n`.
 //!   Rows are grouped by the other columns (one group if there are none, even
@@ -111,7 +116,12 @@
 //!   `?v limit n` limits `?v`: the first `n` values, least first, within
 //!   each value of the variables limited before (`lookup ?people limit 10
 //!   and ?p type ?t limit 10`: at most 10 types for each of 10 people).  At
-//!   the top of a statement's pattern (see [`Query::limit_values`]).
+//!   the top of a statement's pattern (see [`Query::limit_values`]), and
+//!   applied to the matches, before aggregates, `by` and the statement's
+//!   `limit`.  In a `select`, a limit ending the pattern is the
+//!   statement's, so a nested one is followed by more pattern or in
+//!   parentheses: `select ?c where ( ?p city ?c limit 3 )` keeps the rows
+//!   of the first three cities.  `\explain` shows each as `nested limit`.
 //! - An object in parentheses is a test of it, its left side left out:
 //!   `?p mass (< 40)`, `?p name (~"Bob.*")` (a regular expression, anywhere
 //!   in the text: the function `matches`), `?p name (prefix("Bi"))` (a test
@@ -827,6 +837,63 @@ impl RuleDef {
     }
 }
 
+impl Pattern {
+    /// Whether the pattern's last part, through `and`s, is a nested limit:
+    /// one that, written last in a `select`, would be the statement's.
+    pub(crate) fn ends_with_limit(&self) -> bool {
+        match self {
+            Pattern::LimitValues { .. } => true,
+            Pattern::And(ps) => ps.last().is_some_and(Pattern::ends_with_limit),
+            _ => false,
+        }
+    }
+}
+
+/// Removes the nested limit that ends `p`, through `and`s, returning its
+/// limit and offset, if it ends with one; and the node it was of, which
+/// `?v limit n` writes alone, if the pattern binds it elsewhere.
+fn take_last_limit(p: &mut Pattern) -> Option<(usize, usize)> {
+    /// Removes the last part of `p`, through `and`s, and any `and` it
+    /// leaves empty.
+    fn pop_last(p: &mut Pattern) -> Option<Pattern> {
+        let Pattern::And(ps) = p else {
+            return None;
+        };
+        let last = ps.last_mut()?;
+        if matches!(last, Pattern::And(_)) {
+            let popped = pop_last(last);
+            if matches!(last, Pattern::And(qs) if qs.is_empty()) {
+                ps.pop();
+            }
+            popped
+        } else {
+            ps.pop()
+        }
+    }
+    fn last(p: &Pattern) -> &Pattern {
+        match p {
+            Pattern::And(ps) if !ps.is_empty() => last(&ps[ps.len() - 1]),
+            p => p,
+        }
+    }
+    let Pattern::LimitValues { limit, offset, var } = last(p).clone() else {
+        return None;
+    };
+    pop_last(p);
+    if let Pattern::Node(Node::Var(v) | Node::Blank(v)) = last(p)
+        && *v == var
+    {
+        let mut uses = 0;
+        print::each_node(p, &mut |n| {
+            uses += usize::from(matches!(n, Node::Var(v) | Node::Blank(v) if *v == var));
+        });
+        if uses > 1 {
+            pop_last(p);
+        }
+    }
+    Some((limit, offset))
+}
+
 /// A call of a template rule, `name(args)`, expanded: its asserted
 /// triples, and its other patterns (conditions, for a rule that also
 /// matches), with the head's variables the arguments, and the body's other
@@ -1095,6 +1162,9 @@ struct Parser {
     /// alone, or a predicate with no object) and ended the input: a
     /// statement the shell should wait for more of.
     short_end: bool,
+    /// The positions of the last nested limit parsed, and after it: if a
+    /// `select`'s pattern ends there, the limit is the statement's.
+    limit_at: (usize, usize),
     /// Whether the next call is a test of an object in parentheses, whose
     /// first argument, the object, is implied: `(starts("Bo"))`.
     implied_arg: bool,
@@ -1139,7 +1209,13 @@ impl Parser {
     }
 
     fn syntax<T>(&self, message: impl Into<String>) -> Result<T> {
-        let (line, column) = self.here();
+        self.syntax_at(self.pos, message)
+    }
+
+    /// A syntax error at the token at `pos`.
+    fn syntax_at<T>(&self, pos: usize, message: impl Into<String>) -> Result<T> {
+        let t = &self.tokens[pos];
+        let (line, column) = (t.line, t.column);
         Err(Error::Syntax {
             line,
             column,
@@ -1539,52 +1615,9 @@ impl Parser {
                 }
             }
         }
-        let mut by = Vec::new();
-        if self.keyword("by") {
-            loop {
-                let var = self.var()?;
-                let descending = match self.peek() {
-                    Token::Ident(d) if d.eq_ignore_ascii_case("desc") => true,
-                    Token::Ident(a) if a.eq_ignore_ascii_case("asc") => false,
-                    _ => {
-                        by.push(OrderKey {
-                            var,
-                            descending: false,
-                        });
-                        if self.punct(",") {
-                            continue;
-                        }
-                        break;
-                    }
-                };
-                self.next();
-                by.push(OrderKey { var, descending });
-                if !self.punct(",") {
-                    break;
-                }
-            }
-        }
+        let mut by = self.order_keys()?;
         // `limit` and `offset`, in either order.
-        let (mut limit, mut offset) = (None, None);
-        loop {
-            let which = if self.keyword("limit") {
-                &mut limit
-            } else if self.keyword("offset") {
-                &mut offset
-            } else {
-                break;
-            };
-            if which.is_some() {
-                return self.syntax("'limit' and 'offset' may each be given once");
-            }
-            *which = match self.next() {
-                Token::Number(n) => match n.parse() {
-                    Ok(n) => Some(n),
-                    Err(_) => return self.syntax("expected a count"),
-                },
-                _ => return self.syntax("expected a count"),
-            };
-        }
+        let (mut limit, mut offset) = self.limits()?;
         let as_of = self.as_of()?;
         let mut source = None;
         let graph = if self.keyword("from") {
@@ -1600,10 +1633,41 @@ impl Parser {
         if !self.keyword("where") {
             return self.syntax(format!("expected 'where', found {}", self.peek()));
         }
-        let pattern = match graph {
-            Some(g) => Pattern::InGraph(Box::new(self.pattern()?), g),
-            None => self.pattern()?,
-        };
+        let mut pattern = self.pattern()?;
+        // `by`, `limit` and `offset` may instead end the statement, as in
+        // SQL: a limit ending the pattern is the statement's, not a nested
+        // one, which is followed by more pattern or in parentheses.
+        let given_before = limit.is_some() || offset.is_some();
+        let twice = "a select's 'limit' and 'offset' go either before 'where' or after the \
+                     pattern (a nested limit ending it is in parentheses: '( ?p pet ?x limit 1 )')";
+        let (start, end) = self.limit_at;
+        if end == self.pos
+            && let Some((l, o)) = take_last_limit(&mut pattern)
+        {
+            if given_before {
+                return self.syntax_at(start, twice);
+            }
+            limit = (l != usize::MAX).then_some(l);
+            offset = (o > 0).then_some(o);
+        }
+        if self.is(&Token::Keyword("by")) {
+            if !by.is_empty() {
+                return self
+                    .syntax("a select's 'by' goes either before 'where' or after the pattern");
+            }
+            by = self.order_keys()?;
+        }
+        let start = self.pos;
+        let (l, o) = self.limits()?;
+        if l.is_some() || o.is_some() {
+            if given_before || limit.is_some() || offset.is_some() {
+                return self.syntax_at(start, twice);
+            }
+            (limit, offset) = (l, o);
+        }
+        if let Some(g) = graph {
+            pattern = Pattern::InGraph(Box::new(pattern), g);
+        }
         let select = Statement::Select {
             distinct,
             vars,
@@ -2482,6 +2546,45 @@ impl Parser {
     /// `limit n` and `offset n`, in either order, after a predicate's
     /// objects or a variable: a nested limit, if given.
     fn value_limit(&mut self) -> Result<Option<(usize, usize)>> {
+        let start = self.pos;
+        let (limit, offset) = self.limits()?;
+        if limit.is_some() || offset.is_some() {
+            self.limit_at = (start, self.pos);
+        }
+        Ok(match (limit, offset) {
+            (None, None) => None,
+            (l, o) => Some((l.unwrap_or(usize::MAX), o.unwrap_or(0))),
+        })
+    }
+
+    /// `by ?x [desc | asc], ...`, if given.
+    fn order_keys(&mut self) -> Result<Vec<OrderKey>> {
+        let mut by = Vec::new();
+        if !self.keyword("by") {
+            return Ok(by);
+        }
+        loop {
+            let var = self.var()?;
+            let descending = match self.peek() {
+                Token::Ident(w) if w.eq_ignore_ascii_case("desc") => Some(true),
+                Token::Ident(w) if w.eq_ignore_ascii_case("asc") => Some(false),
+                _ => None,
+            };
+            if descending.is_some() {
+                self.next();
+            }
+            by.push(OrderKey {
+                var,
+                descending: descending.unwrap_or(false),
+            });
+            if !self.punct(",") {
+                return Ok(by);
+            }
+        }
+    }
+
+    /// `limit n` and `offset n`, in either order, each perhaps.
+    fn limits(&mut self) -> Result<(Option<usize>, Option<usize>)> {
         let (mut limit, mut offset) = (None, None);
         loop {
             let which = if self.keyword("limit") {
@@ -2502,10 +2605,7 @@ impl Parser {
                 _ => return self.syntax("expected a count"),
             };
         }
-        Ok(match (limit, offset) {
-            (None, None) => None,
-            (l, o) => Some((l.unwrap_or(usize::MAX), o.unwrap_or(0))),
-        })
+        Ok((limit, offset))
     }
 
     /// Alternatives of a path expression: `p | q`.
@@ -2822,6 +2922,7 @@ pub fn is_incomplete(text: &str) -> bool {
         blanks: 0,
         in_template: false,
         short_end: false,
+        limit_at: (0, 0),
         implied_arg: false,
         symbols: HashSet::new(),
         source: None,
@@ -2857,6 +2958,7 @@ pub fn ends_short(text: &str) -> bool {
         blanks: 0,
         in_template: false,
         short_end: false,
+        limit_at: (0, 0),
         implied_arg: false,
         symbols: HashSet::new(),
         source: None,
@@ -2899,6 +3001,7 @@ pub fn parse_with_symbols(
         blanks: 0,
         in_template: false,
         short_end: false,
+        limit_at: (0, 0),
         implied_arg: false,
         symbols: symbols.into_iter().map(Into::into).collect(),
         source: None,

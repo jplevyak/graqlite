@@ -2345,6 +2345,16 @@ impl Plan {
                 .collect();
         }
         let mut m = self.matched(g, values, overlay)?;
+        // Nested limits apply to the matches, before computing, as they do
+        // to rows.
+        if !q.value_limits.is_empty() {
+            m.op = Box::new(ValueLimits {
+                input: Some(m.op),
+                limits: q.value_limits.clone(),
+                rows: Batch::new(m.width),
+                pos: 0,
+            });
+        }
         let mut batch = Batch::new(m.width);
         drain(m.op.as_mut(), g, &mut batch)?;
         let rows = (0..batch.len()).map(|i| batch.row(i).to_vec()).collect();

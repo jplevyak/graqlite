@@ -289,6 +289,19 @@ impl Plan {
         }
         explain_group(q, &self.root, 0, true, name, &mut out);
         let var = |v: Var| q.var_name(v);
+        // Nested limits, after matching: each within the values of those
+        // before it.
+        for (k, &(v, limit, offset)) in q.value_limits.iter().enumerate() {
+            let _ = write!(out, "nested limit {} {limit}", var(v));
+            if offset > 0 {
+                let _ = write!(out, " offset {offset}");
+            }
+            if k > 0 {
+                let before: Vec<String> = q.value_limits[..k].iter().map(|l| var(l.0)).collect();
+                let _ = write!(out, " for each {}", before.join(", "));
+            }
+            out.push('\n');
+        }
         for (v, c) in &q.computed {
             let _ = match c {
                 super::Computed::Value(e) => {

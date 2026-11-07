@@ -28,6 +28,12 @@ lookup ?film /film/film/directed_by ?director .
        AND ?film LIMIT 1
        AND ?actor LIMIT 1
 
+-- In a select, a limit ending the pattern is the statement's, so a nested
+-- one there is in parentheses: the pets of the first two people with pets,
+-- against the first two rows.
+select ?p, ?pet where ( ?p pet ?pet . ?p LIMIT 2 )
+select ?p, ?pet where ?p pet ?pet . ?p LIMIT 2
+
 -- Functions of values, callable in expressions; '/' binds tighter than
 -- '+', and a type tag converts ('+integer' adds numbers to an integer).
 FUNCTION foo(x, y) x + y / 3

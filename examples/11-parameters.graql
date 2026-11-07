@@ -24,6 +24,9 @@ select ?f by ?f limit 2 where /ann knows ?f
 
 select ?f by ?f limit 2 offset 2 where /ann knows ?f
 
+-- As in SQL, `by`, `limit` and `offset` may instead end the statement.
+select ?f where /ann knows ?f by ?f limit 2 offset 2
+
 -- `by` orders numbers by value (so 9 before 10), then other data.
 insert /eve tag 9 , 10 , 100 , x
 

@@ -2849,7 +2849,7 @@ fn the_rest_of_the_tour() {
     let out = run(
         &mut g,
         &mut s,
-        "select ?p, ?x where ?p a person and ?p pet ?x . ?p limit 2 . ?x limit 1",
+        "select ?p, ?x where ?p a person and ?p pet ?x and ( ?p limit 2 . ?x limit 1 )",
     )
     .unwrap();
     assert_eq!(names(&g, &out).len(), 2);
@@ -3213,4 +3213,126 @@ fn sessions_on_readers() {
         panic!()
     };
     assert_eq!(rows.len(), 60);
+}
+
+#[test]
+fn trailing_limit_is_the_statements() {
+    let one = |text: &str| {
+        let mut s = parse(text).unwrap();
+        assert_eq!(s.len(), 1, "{text}");
+        s.pop().unwrap()
+    };
+    // A limit, offset or `by` ending a select is the statement's, as it is
+    // written before 'where'.
+    for (after, before) in [
+        (
+            "select ?c, count(?p) as ?n by ?n desc where ?p city ?c limit 3",
+            "select ?c, count(?p) as ?n by ?n desc limit 3 where ?p city ?c",
+        ),
+        (
+            "select ?c, count(?p) as ?n where ?p city ?c by ?n desc limit 3",
+            "select ?c, count(?p) as ?n by ?n desc limit 3 where ?p city ?c",
+        ),
+        (
+            "select ?c where ?p city ?c limit 3 by ?c",
+            "select ?c by ?c limit 3 where ?p city ?c",
+        ),
+        (
+            "select ?c where ?p name ?n ; city ?c limit 3 offset 1",
+            "select ?c limit 3 offset 1 where ?p name ?n ; city ?c",
+        ),
+        (
+            "select ?c where ?p city ?c offset 2",
+            "select ?c offset 2 where ?p city ?c",
+        ),
+        (
+            "select ?c where ?p city ?c . ?c limit 3",
+            "select ?c limit 3 where ?p city ?c",
+        ),
+        (
+            "select ?c where ?p city ?c and ?p a person limit 3",
+            "select ?c limit 3 where ?p city ?c and ?p a person",
+        ),
+        (
+            "select ?c from g1 where ?p city ?c limit 3",
+            "select ?c limit 3 from g1 where ?p city ?c",
+        ),
+        (
+            "select ?c where ?p city ?c limit 3 select ?p where ?p a person",
+            "select ?c limit 3 where ?p city ?c select ?p where ?p a person",
+        ),
+    ] {
+        let a = parse(after).unwrap();
+        assert_eq!(a, parse(before).unwrap(), "{after}");
+    }
+    // A nested limit followed by more pattern, or in parentheses, stays one.
+    for text in [
+        "select ?c where ?p city ?c limit 3 . ?p name ?n",
+        "select ?c where ( ?p city ?c limit 3 )",
+        "select ?c limit 2 where ( ?p city ?c limit 3 )",
+        "select ?p, ?x where ?p a person and ?p pet ?x and ( ?p limit 2 . ?x limit 1 )",
+    ] {
+        let Statement::Select { pattern, .. } = one(text) else {
+            panic!("{text}")
+        };
+        let mut limits = 0;
+        fn count(p: &Pattern, n: &mut usize) {
+            match p {
+                Pattern::LimitValues { .. } => *n += 1,
+                Pattern::And(ps) => ps.iter().for_each(|p| count(p, n)),
+                _ => {}
+            }
+        }
+        count(&pattern, &mut limits);
+        assert!(limits > 0, "{text}");
+    }
+    // Both places at once is an error.
+    for text in [
+        "select ?c limit 3 where ?p city ?c limit 1",
+        "select ?c offset 1 where ?p city ?c limit 1",
+        "select ?c limit 3 where ?p city ?c offset 1",
+        "select ?c by ?c where ?p city ?c by ?c",
+        "select ?c where ?p city ?c limit 1 by ?c limit 2",
+    ] {
+        assert!(parse(text).is_err(), "{text}");
+    }
+    // A nested limit ending the pattern prints in parentheses, so that it
+    // reads back the same.
+    let s = one("select ?c where ( ?p city ?c limit 3 )");
+    assert_eq!(s.to_string(), "select ?c where ( ?p city ?c . ?c limit 3 )");
+    assert_eq!(one(&s.to_string()).to_string(), s.to_string());
+}
+
+#[test]
+fn explain_shows_nested_limits() {
+    let mut g = graph();
+    execute(&mut g, "insert /a pet /x ; a person . /b pet /y ; a person").unwrap();
+    let statement =
+        &parse("select ?p, ?x where ( ?p a person and ?p pet ?x limit 1 offset 1 . ?p limit 2 )")
+            .unwrap()[0];
+    let (q, _) = statement.query(&g).unwrap();
+    let explain = q.plan(&g).unwrap().explain();
+    assert!(
+        explain.contains("\nnested limit ?x 1 offset 1\n"),
+        "{explain}"
+    );
+    assert!(
+        explain.contains("\nnested limit ?p 2 for each ?x\n"),
+        "{explain}"
+    );
+}
+
+#[test]
+fn nested_limits_apply_before_aggregating() {
+    let mut g = graph();
+    execute(&mut g, "insert /a a person . /b a person . /c a person").unwrap();
+    let out = one(
+        &mut g,
+        "select count(?p) as ?n where ( ?p a person limit 2 )",
+    );
+    let Output::Table { rows, .. } = &out else {
+        panic!("{out:?}")
+    };
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0][0], Cell::Int(2)), "{rows:?}");
 }

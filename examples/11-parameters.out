@@ -33,6 +33,11 @@ showing ids is off
  /dan
  /eve
 (2 rows)
+ f
+------
+ /dan
+ /eve
+(2 rows)
 INSERT 4
  t
 -----

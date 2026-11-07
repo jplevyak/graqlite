@@ -1,0 +1,12 @@
+-- A limit ending a select's pattern is the statement's, as in SQL: the two
+-- biggest cities, either way it is written.  In parentheses it is a nested
+-- limit, of ?c: the first two cities.
+insert /a city /paris . /b city /rome . /c city /rome . /d city /oslo .
+       /e city /oslo . /f city /oslo . /g city /lima
+select ?c, count(?p) as ?n by ?n desc where ?p city ?c limit 2
+select ?c, count(?p) as ?n where ?p city ?c by ?n desc limit 2
+select ?c, count(?p) as ?n by ?n desc limit 2 where ?p city ?c
+select ?c, count(?p) as ?n by ?n desc where ( ?p city ?c limit 2 )
+\explain select ?c where ( ?p city ?c limit 2 )
+-- Both is an error.
+select ?c limit 1 where ?p city ?c limit 2

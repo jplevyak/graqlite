@@ -258,8 +258,9 @@ full; in short:
 to 2021 and has since renamed TypeQL. graqlite has no schema: any node can
 have any predicate.)
 
-- **Statements:** `select` (with expressions, aggregates, `having`, `by`,
-  `limit`, `offset`), `verify`, `lookup` (returning a graph), `insert` and
+- **Statements:** `select` (with expressions, aggregates, `having`, and `by`,
+  `limit` and `offset` before `where` or, as in SQL, after the pattern),
+  `verify`, `lookup` (returning a graph), `insert` and
   `delete` with templates and `where`, `rule` / `delete rule`, `insert graph
   G`, `maintain`, `author` and `subgraph`, `set`, `data`, `default`,
   `assume`, `function` and `test`, each query optionally `as of` an id or an
@@ -290,7 +291,7 @@ have any predicate.)
   `lookup … in graph g`, `insert graph g`; and the session's graphs, `data
   {}` (scratch), `default { … }` (a schema under every graph) and `assume`.
 - **The rest of the tour:** `lookup - pattern` defaults, nested limits
-  (`?p a person limit 10 and ?p pet ?x limit 1`), `function`s with
+  (`lookup ?p a person limit 10 and ?p pet ?x limit 1`), `function`s with
   conditions and typed operators, bare rule parameters, template rules
   (`insert property(/p 0 "gloss")`), `test`, and the shell's `\format
   tree`.

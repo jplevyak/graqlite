@@ -1,0 +1,25 @@
+INSERT 7
+ c     | n
+-------+---
+ /oslo | 3
+ /rome | 2
+(2 rows)
+ c     | n
+-------+---
+ /oslo | 3
+ /rome | 2
+(2 rows)
+ c     | n
+-------+---
+ /oslo | 3
+ /rome | 2
+(2 rows)
+ c      | n
+--------+---
+ /rome  | 2
+ /paris | 1
+(2 rows)
+scan (?p city ?c) via predicate index, rows ~7
+nested limit ?c 2
+tests/cli/trailing-limit.graql:12:36: error: a select's 'limit' and 'offset' go either before 'where' or after the pattern (a nested limit ending it is in parentheses: '( ?p pet ?x limit 1 )')
+[exit 1]
