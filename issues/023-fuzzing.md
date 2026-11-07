@@ -1,6 +1,6 @@
 # Fuzz the parsers and the restore paths
 
-**Status:** open · **Size:** small · **Related:** [022](022-release-readiness.md) (CI)
+**Status:** open · **Size:** small · **Related:** [022](closed/022-release-readiness.md) (CI)
 
 ## Problem
 

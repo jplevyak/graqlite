@@ -17,7 +17,7 @@ use std::io;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
 
-use crate::dynamic_table::{self, Inserted, Lookup, Reader, Writer, MAX_VALUES};
+use crate::dynamic_table::{self, Inserted, Lookup, MAX_VALUES, Reader, Writer};
 pub use crate::dynamic_table::{Error, Options, Result};
 use crate::postings::{self, Cursor, Postings, PostingsReader};
 use crate::record::Uuid;

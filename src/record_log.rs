@@ -16,8 +16,8 @@
 //!   stay small.  The first group also carries a free *extra bit*.
 
 use crate::coder::{
-    decode_field, decode_group, decode_tagged_varint, encode_field, encode_group,
-    encode_tagged_varint, group_field, group_len, tagged_varint_len, GROUP_MAX,
+    GROUP_MAX, decode_field, decode_group, decode_tagged_varint, encode_field, encode_group,
+    encode_tagged_varint, group_field, group_len, tagged_varint_len,
 };
 use crate::{Error, Result};
 

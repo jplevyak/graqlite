@@ -254,6 +254,10 @@ assert_eq!(friends.run(&g, &[b]).unwrap(), [[c]]);
 query engine. The [`graql` module docs](src/graql.rs) list the syntax in
 full; in short:
 
+(GraQL is unrelated to Graql, the typed query language TypeDB used from 2016
+to 2021 and has since renamed TypeQL. graqlite has no schema: any node can
+have any predicate.)
+
 - **Statements:** `select` (with expressions, aggregates, `having`, `by`,
   `limit`, `offset`), `verify`, `lookup` (returning a graph), `insert` and
   `delete` with templates and `where`, `rule` / `delete rule`, `insert graph
@@ -589,10 +593,22 @@ GRAQLITE_BLESS=1 cargo test --test cli   # rewrite the scripts' .out files
 cargo clippy --all-targets
 cargo bench         # criterion: record log, index, lookups, GraQL
 cargo doc --open
+python3 scripts/check-links.py   # the Markdown files' relative links
 ```
+
+The library needs Rust 1.88 or later (`rust-version` in `Cargo.toml`). The
+shell's line editor, rustyline 19, needs 1.95, so on an older toolchain build
+the library alone with `--no-default-features`. CI (`.github/workflows/ci.yml`)
+runs the formatting, clippy and link checks, the tests on Linux and macOS, and
+both minimum toolchains. [`BENCHMARKS.md`](BENCHMARKS.md) records the
+benchmarks' numbers on one machine, to compare a change with.
 
 graqlite's runtime dependencies are [libc](https://crates.io/crates/libc), for
 memory mapping, [sha2](https://crates.io/crates/sha2), for value uuids, and
 [regex-lite](https://crates.io/crates/regex-lite), for GraQL's `~`.
 [rustyline](https://crates.io/crates/rustyline) is used by the shell only, and
 [criterion](https://crates.io/crates/criterion) for benchmarks only.
+
+## License
+
+MIT; see [LICENSE](LICENSE).

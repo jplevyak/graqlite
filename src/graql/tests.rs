@@ -1113,9 +1113,10 @@ fn link_nodes() {
         Output::Inserted(2)
     );
     let since = g.find_value(b"since").unwrap();
-    assert!(g
-        .find_link(to_bob, since, g.find_value(b"2019").unwrap())
-        .is_some());
+    assert!(
+        g.find_link(to_bob, since, g.find_value(b"2019").unwrap())
+            .is_some()
+    );
     let out = one(
         &mut g,
         "select ?who, ?y where << /alice knows ?who >> since ?y",
@@ -2251,9 +2252,11 @@ fn lookups_derive_links() {
     one(&mut g, "rule reach(?x ?y) ?x knows ?z . reach(?z ?y)");
     let found = graph(&mut g, "lookup reach(/b ?y)");
     assert_eq!(derived(&found), [(b, c, vec![bc]), (b, d, vec![bc, cd])]);
-    assert!(found
-        .derived()
-        .all(|l| matches!(l, ResultLink::Derived { by: Derivation::Rule(n), .. } if n == "reach")));
+    assert!(
+        found.derived().all(
+            |l| matches!(l, ResultLink::Derived { by: Derivation::Rule(n), .. } if n == "reach")
+        )
+    );
     // A path expression: the shortest walk, inverse steps included.  (A
     // chain, such as `knows / ^likes`, is patterns: stored links only.)
     let found = graph(&mut g, "lookup /a (knows+ / ^likes) ?y");
@@ -2377,9 +2380,11 @@ fn lookups_assert_links() {
     // An asserted triple that is stored comes back as its link.
     let found = graph(&mut g, "lookup ?p pet ?x . ?p name \"John Smith\"!");
     assert_eq!(found.derived().count(), 0);
-    assert!(found
-        .stored()
-        .any(|id| id == g.find_link(dan, name, smith).unwrap()));
+    assert!(
+        found
+            .stored()
+            .any(|id| id == g.find_link(dan, name, smith).unwrap())
+    );
     // A rule asserts for each tuple it derives, when called.
     one(&mut g, "rule pet_owner(?p) ?p pet ? . ?p owns_pets true!");
     assert_eq!(
@@ -2856,25 +2861,31 @@ fn the_rest_of_the_tour() {
     )
     .unwrap();
     assert!(matches!(&out[..], [Output::Done(t)] if t.contains("passed")));
-    assert!(run(
-        &mut g,
-        &mut s,
-        "test select ?x where /joe pet ?x select ?x where /ann pet ?x"
-    )
-    .is_err());
+    assert!(
+        run(
+            &mut g,
+            &mut s,
+            "test select ?x where /joe pet ?x select ?x where /ann pet ?x"
+        )
+        .is_err()
+    );
     // A lookup's graph equals a graph of the same links.
-    assert!(run(
-        &mut g,
-        &mut s,
-        "test lookup ?p mass (< 40) graph { /ann mass 30 }"
-    )
-    .is_ok());
-    assert!(run(
-        &mut g,
-        &mut s,
-        "test lookup ?p mass (< 40) graph { /ann mass 31 }"
-    )
-    .is_err());
+    assert!(
+        run(
+            &mut g,
+            &mut s,
+            "test lookup ?p mass (< 40) graph { /ann mass 30 }"
+        )
+        .is_ok()
+    );
+    assert!(
+        run(
+            &mut g,
+            &mut s,
+            "test lookup ?p mass (< 40) graph { /ann mass 31 }"
+        )
+        .is_err()
+    );
     // Functions, with typed operators and conditions.
     run(&mut g, &mut s, "function kg(lbs) lbs / 2.2").unwrap();
     run(
@@ -3144,12 +3155,14 @@ fn maintaining_subgraphs_in_graql() {
     // And then settles.
     assert!(s.update(&mut g).unwrap().is_empty());
     // A template's variables come from the pattern; no blank nodes.
-    assert!(s
-        .execute(&mut g, "maintain ?x knows ?z into m where ?x knows ?y")
-        .is_err());
-    assert!(s
-        .execute(&mut g, "maintain ?x knows [] into m where ?x knows ?y")
-        .is_err());
+    assert!(
+        s.execute(&mut g, "maintain ?x knows ?z into m where ?x knows ?y")
+            .is_err()
+    );
+    assert!(
+        s.execute(&mut g, "maintain ?x knows [] into m where ?x knows ?y")
+            .is_err()
+    );
 }
 
 #[test]

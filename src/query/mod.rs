@@ -185,7 +185,7 @@ pub use exec::Rows;
 pub use link_aggregate::{LinkAggregate, LinkFunction};
 pub use maintained::{MaintainedSubgraph, SubgraphChanges};
 pub use overlay::{Overlay, OverlayLink};
-pub use plan::{Plan, Prepared, EXHAUSTIVE_PATTERNS, REPLAN_FACTOR};
+pub use plan::{EXHAUSTIVE_PATTERNS, Plan, Prepared, REPLAN_FACTOR};
 pub use reduce::DEFAULT_REDUCTION_BUDGET;
 pub use result::{Derivation, ResultGraph, ResultLink, ResultNode};
 pub use standing::{Changes, StandingQuery};

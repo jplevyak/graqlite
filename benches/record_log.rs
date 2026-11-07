@@ -1,8 +1,8 @@
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use graqlite::record_log::{max_tuple_len, HEADER_SIZE};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use graqlite::RecordLog;
+use graqlite::record_log::{HEADER_SIZE, max_tuple_len};
 
 /// The number of ids written per iteration.
 const IDS: usize = 100_000;
