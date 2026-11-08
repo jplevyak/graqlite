@@ -117,9 +117,9 @@ local ones.
 Index entries that grow large become append-only B+ trees, streamed newest
 first. A graph keeps all its history unless **compacted** (`compact`, or
 `tick` with `Options::history`), which drops from large entries what no query
-as of the horizon or later can see; queries as of earlier then fail. The old
-entries' pages are reused for new ones, so the files stop growing once the
-history is a steady size; `\info` shows the pages free.
+as of the horizon or later can see; queries as of earlier then fail. The
+pages of the entries it replaces are reused for new ones, so the index files
+stop growing once the history kept is a steady size (they never shrink).
 
 ### Threads and readers
 
@@ -340,8 +340,7 @@ before it is saved. Each definition has reference links to the values and
 keys it names and the rules it calls, so `graql::rules_using` finds the rules
 that use something. A query includes only the rules it calls, directly or
 not, and saved text that no longer parses is left out and reported by
-`Session::skipped_rules`. Parsed statements print back as canonical GraQL
-(`Display`).
+`Session::skipped_rules`.
 
 ```rust
 use graqlite::graph::{Graph, Options};
@@ -376,8 +375,8 @@ mydb=> select ?who, ?age where /alice knows ?who . ?who age ?age
 (1 row)
 ```
 
-`DIR` is the directory of the database, created if it does not exist; with
-none, the database is in memory. A statement runs when it is complete. A line
+`graqlite DIR` opens the database in the directory `DIR`, created if it
+does not exist; with no `DIR`, the database is in memory and lost on exit. A statement runs when it is complete. A line
 ending in `.`, `;`, `,`, `and`, `or` or an open parenthesis continues it, and
 a blank line runs what has been entered. Each statement is committed as it
 runs, unless in a `\begin` ... `\commit` (or `\rollback`) transaction. A
@@ -395,13 +394,13 @@ commands:
 | `\dr`                       | the rules saved in the database, with their bodies |
 | `\subgraphs`                | the subgraphs, with their links                   |
 | `\drop NAME`                | delete every definition of a rule                 |
-| `\info`                     | a summary of the database                         |
+| `\info`                     | a summary of the database, with the large index entries' pages and how many are free |
 | `\show ENTRY`               | an entry (`#id`, `/key` or value) and its links   |
 | `\explain STMT`             | the query plan of a `select`, `verify` or `lookup` |
 | `\begin`, `\commit`, `\rollback` | transactions                              |
 | `\x`, `\format aligned\|csv\|tsv\|tree`, `\ids`, `\timing` | output settings |
 | `\set [NAME VALUE]`, `\unset NAME` | parameters (`$NAME`); also `-v NAME=VALUE` |
-| `\i FILE`, `\o [FILE]`       | run a file; send results to a file                |
+| `\i FILE`, `\o [FILE]`      | run a file; send results to a file                |
 | `\dump FILE`                | write a snapshot (restore it with `--restore`)    |
 | `\compact ID\|TIME`         | drop the history before an id or time from large index entries; `as of` earlier then fails |
 | `\?`, `\q`                  | help; quit                                        |
@@ -556,7 +555,8 @@ src/
                       snapshots (tests in local_record_log/)
   local_table.rs      index from ids or uuids to id sets, on a dynamic table,
                       promoting large sets to trees and compacting them
-  postings.rs         large index entries as append-only B+ trees
+  postings.rs         large index entries as append-only B+ trees, and the
+                      reuse of compacted ones' pages (tests in postings/)
   local.rs            local database: a log plus index tables (tests in local/)
   tuple_index.rs      built-in graph indexes: links by linkage, values, SPO,
                       intersections (tests in tuple_index/)
@@ -588,6 +588,7 @@ tests/
   cli.rs              runs the shell on the examples and tests/cli/*.graql,
                       comparing with their .out files, and tests its options
 issues/               design notes for open work (closed ones in closed/)
+scripts/              check-links.py, run by CI
 ```
 
 ## Building and testing
@@ -610,8 +611,9 @@ both minimum toolchains. [`BENCHMARKS.md`](BENCHMARKS.md) records the
 benchmarks' numbers on one machine, to compare a change with.
 
 graqlite's runtime dependencies are [libc](https://crates.io/crates/libc), for
-memory mapping, [sha2](https://crates.io/crates/sha2), for value uuids, and
-[regex-lite](https://crates.io/crates/regex-lite), for GraQL's `~`.
+memory mapping, [arc-swap](https://crates.io/crates/arc-swap), for the index
+levels that lookups hold, [sha2](https://crates.io/crates/sha2), for value
+uuids, and [regex-lite](https://crates.io/crates/regex-lite), for GraQL's `~`.
 [rustyline](https://crates.io/crates/rustyline) is used by the shell only, and
 [criterion](https://crates.io/crates/criterion) for benchmarks only.
 
