@@ -7,7 +7,7 @@ use super::{
 };
 use std::sync::Arc;
 
-use crate::graph::Graph;
+use crate::graph::{Graph, Holds};
 use crate::query;
 use crate::query::aggregate::Cell;
 
@@ -106,6 +106,7 @@ impl Session {
             });
         }
         let vars = fast.names.clone();
+        let holds = Holds::of(fast.query.query(), None);
         Ok(match &prepared.statement {
             Statement::Verify { .. } => {
                 Output::Verified(!fast.query.run_values(g, &values)?.is_empty())
@@ -113,10 +114,12 @@ impl Session {
             Statement::Select { .. } if fast.query.query().computes() => Output::Table {
                 vars,
                 rows: fast.query.cells_values(g, &values)?,
+                holds,
             },
             Statement::Select { .. } => Output::Rows {
                 vars,
                 rows: fast.query.run_values(g, &values)?,
+                holds,
             },
             Statement::Lookup { .. } => Output::Graph(fast.query.graph_values(g, &values)?),
             _ => unreachable!("a select, verify or lookup"),

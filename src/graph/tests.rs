@@ -1137,6 +1137,54 @@ fn ephemeral_values_and_keys() {
     ));
 }
 
+#[test]
+fn holds_free_ephemeral_ids_once_none_has_them() {
+    let mut g = Graph::open(None, Options::default()).unwrap();
+    let five = g.value(b"5").unwrap();
+    let (a, b) = (g.ephemeral_hold(), g.ephemeral_hold());
+    // The graph's own, as without a hold, and held by none.
+    assert_eq!(a.value(&g, b"5"), five);
+    // Holds share ids of the same data.
+    let six = a.value(&g, b"6");
+    assert_eq!(b.value(&g, b"6"), six);
+    let k = a.key(&g, b"/k");
+    let n = a.node(&g);
+    assert_eq!(g.ephemeral_count(), 3);
+    // Freed with the last hold of them: `b` keeps six, and a clone of `a`
+    // its others.
+    let a2 = a.clone();
+    drop(a);
+    assert_eq!(g.data(six).as_deref(), Some(&b"6"[..]));
+    drop(a2);
+    assert_eq!(g.ephemeral_count(), 1);
+    assert_eq!(g.data(six).as_deref(), Some(&b"6"[..]));
+    // Retained, by another hold.
+    let c = g.ephemeral_hold();
+    c.retain(six);
+    c.retain(five);
+    drop(b);
+    assert_eq!(g.data(six).as_deref(), Some(&b"6"[..]));
+    drop(c);
+    assert_eq!(g.ephemeral_count(), 0);
+    // Ids aren't given again: data held again has a new one.
+    let d = g.ephemeral_hold();
+    let again = d.value(&g, b"6");
+    assert!(again != six && again != k && again != n);
+    // One given without a hold is kept, even once held and let go.
+    let seven = g.ephemeral_value(b"7");
+    assert_eq!(d.value(&g, b"7"), seven);
+    drop(d);
+    assert_eq!(g.ephemeral_count(), 1);
+    assert_eq!(g.data(seven).as_deref(), Some(&b"7"[..]));
+    // A reader's holds are the graph's.
+    let r = g.reader();
+    let e = r.ephemeral_hold();
+    let eight = e.value(&r, b"8");
+    assert_eq!(g.data(eight).as_deref(), Some(&b"8"[..]));
+    drop(e);
+    assert_eq!(g.ephemeral_count(), 1);
+}
+
 /// A graph can be shared between threads: queries read `&Graph`.
 const _: () = {
     const fn shared<T: Send + Sync>() {}

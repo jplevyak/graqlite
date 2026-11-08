@@ -344,7 +344,7 @@ impl Shell {
     fn output(&mut self, output: &Output) -> io::Result<()> {
         let mut namer = Namer::new(&self.g, self.style);
         match output {
-            Output::Rows { vars, rows } => {
+            Output::Rows { vars, rows, .. } => {
                 let table = Table {
                     columns: vars.clone(),
                     rows: rows
@@ -443,7 +443,7 @@ impl Shell {
                 let table = Table { columns, rows };
                 table.write(&mut *self.out, self.style)
             }
-            Output::Table { vars, rows } => {
+            Output::Table { vars, rows, .. } => {
                 let table = Table {
                     columns: vars.clone(),
                     rows: rows

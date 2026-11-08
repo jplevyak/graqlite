@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::aggregate::Cell;
 use super::reduce::Link;
 use super::result::{ResultGraph, ResultLink, ResultNode};
-use crate::graph::{EPHEMERAL, Graph, Result};
+use crate::graph::{EPHEMERAL, EphemeralHold, Graph, Holds, Result};
 
 /// A link of an [`Overlay`]: its fact, whether it is live (a dead one
 /// deletes the fact from what is beneath), its author and subgraphs.
@@ -41,7 +41,8 @@ enum Field {
 /// An overlay has one link per fact: setting it again (live, or dead)
 /// replaces it.  Its links, nodes and values not in the graph have
 /// [ephemeral](Graph::ephemeral_value) ids, so they work in rows and
-/// compare by id as stored ones do; they last while the graph is open.
+/// compare by id as stored ones do; its [hold](Self::ephemeral_hold) keeps
+/// them while it lives.
 ///
 /// - **History:** an overlay has none.  A query `as of` an id sees the
 ///   database as of then, and the overlay as it is.
@@ -58,6 +59,10 @@ pub struct Overlay {
     by_fact: HashMap<[u64; 3], usize>,
     by_id: HashMap<u64, usize>,
     index: HashMap<(Field, u64), Vec<usize>>,
+    /// The hold of the ephemeral ids its links name, and the holds of the
+    /// overlays it was layered from (see [`holds`](Self::holds)).
+    hold: Option<EphemeralHold>,
+    holds: Holds,
 }
 
 impl Default for Overlay {
@@ -75,6 +80,8 @@ impl Overlay {
             by_fact: HashMap::new(),
             by_id: HashMap::new(),
             index: HashMap::new(),
+            hold: None,
+            holds: Holds::default(),
         }
     }
 
@@ -84,6 +91,23 @@ impl Overlay {
             base: false,
             ..Self::new()
         }
+    }
+
+    /// The hold of the ephemeral ids its links name, which they are held by
+    /// while it lives: its links' ids, their facts' nodes not in the graph,
+    /// and its blank nodes.
+    pub fn ephemeral_hold(&mut self, g: &Graph) -> &EphemeralHold {
+        self.hold.get_or_insert_with(|| g.ephemeral_hold())
+    }
+
+    /// The holds of the ephemeral ids it names: for a result reading it to
+    /// keep.
+    pub fn holds(&self) -> Holds {
+        let mut out = self.holds.clone();
+        if let Some(h) = &self.hold {
+            out.push(h);
+        }
+        out
     }
 
     /// Whether the database's links are beneath.
@@ -132,6 +156,11 @@ impl Overlay {
         subgraphs: &[u64],
     ) -> u64 {
         if let Some(&i) = self.by_fact.get(&spo) {
+            if live {
+                let h = self.hold.get_or_insert_with(|| g.ephemeral_hold());
+                h.retain(author);
+                subgraphs.iter().for_each(|&sg| h.retain(sg));
+            }
             let was_live = self.links[i].live;
             let l = &mut self.links[i];
             l.live = live;
@@ -152,7 +181,11 @@ impl Overlay {
             self.reindex(i);
             return id;
         }
-        let id = g.ephemeral_node();
+        let h = self.hold.get_or_insert_with(|| g.ephemeral_hold());
+        let id = h.node(g);
+        for &e in spo.iter().chain(&[author]).chain(subgraphs) {
+            h.retain(e);
+        }
         let i = self.links.len();
         self.links.push(OverlayLink {
             id,
@@ -242,6 +275,7 @@ impl Overlay {
     /// replacing those of the same facts, over `lower`'s base.
     pub fn over(&self, lower: &Overlay) -> Overlay {
         let mut out = lower.clone();
+        out.holds.extend(&self.holds());
         for l in &self.links {
             match out.by_fact.get(&l.spo) {
                 Some(&i) => {
@@ -339,12 +373,21 @@ impl Overlay {
                     for (id, f) in ids.iter_mut().zip(fields) {
                         *id = match f {
                             ResultNode::Entry(e) => *e,
-                            ResultNode::Value(Cell::Text(t)) => g.ephemeral_value(t.as_bytes()),
-                            ResultNode::Value(c) => g.ephemeral_value(c.to_string().as_bytes()),
-                            ResultNode::Key(k) => g.ephemeral_key(k.as_bytes()),
-                            ResultNode::Blank(n) => {
-                                *blanks.entry(*n).or_insert_with(|| g.ephemeral_node())
+                            ResultNode::Value(Cell::Text(t)) => {
+                                out.ephemeral_hold(g).value(g, t.as_bytes())
                             }
+                            ResultNode::Value(c) => {
+                                out.ephemeral_hold(g).value(g, c.to_string().as_bytes())
+                            }
+                            ResultNode::Key(k) => out.ephemeral_hold(g).key(g, k.as_bytes()),
+                            ResultNode::Blank(n) => match blanks.get(n) {
+                                Some(&id) => id,
+                                None => {
+                                    let id = out.ephemeral_hold(g).node(g);
+                                    blanks.insert(*n, id);
+                                    id
+                                }
+                            },
                             _ => {
                                 ok = false;
                                 0

@@ -106,7 +106,7 @@
 //! [`postings`](crate::postings#compaction)).
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -290,27 +290,213 @@ enum EphemeralKind {
     Anonymous,
 }
 
-/// Values, keys and nodes held in memory, never written: each one's kind
-/// and data, by id, and the id of each value and key.
+/// Values, keys and nodes held in memory, never written: each one's kind,
+/// data and holds, by id, and the id of each value and key.  Ids aren't
+/// given again, so one freed names nothing rather than other data.
 #[derive(Default)]
 struct Ephemeral {
-    data: Vec<(EphemeralKind, Box<[u8]>)>,
+    /// The ids given, so far: the next one's, without [`EPHEMERAL`].
+    next: u64,
+    entries: HashMap<u64, EphemeralEntry>,
     ids: HashMap<(EphemeralKind, Box<[u8]>), u64>,
 }
 
+struct EphemeralEntry {
+    kind: EphemeralKind,
+    data: Box<[u8]>,
+    /// The [holds](EphemeralHold) holding it, freed once there are none; or
+    /// `None` if kept while the graph is open, once given with no hold.
+    holds: Option<usize>,
+}
+
 impl Ephemeral {
-    fn id(&mut self, kind: EphemeralKind, data: &[u8]) -> u64 {
-        if kind != EphemeralKind::Anonymous
-            && let Some(&id) = self.ids.get(&(kind, data.into()))
-        {
+    /// The id of the `data` of `kind` (a new one, for an anonymous node),
+    /// added to `hold`'s, or kept for good if `hold` is `None`.
+    fn id(&mut self, kind: EphemeralKind, data: &[u8], hold: Option<&mut HashSet<u64>>) -> u64 {
+        let found = if kind == EphemeralKind::Anonymous {
+            None
+        } else {
+            self.ids.get(&(kind, data.into())).copied()
+        };
+        let id = found.unwrap_or_else(|| {
+            let id = EPHEMERAL | self.next;
+            self.next += 1;
+            let data: Box<[u8]> = data.into();
+            if kind != EphemeralKind::Anonymous {
+                self.ids.insert((kind, data.clone()), id);
+            }
+            self.entries.insert(
+                id,
+                EphemeralEntry {
+                    kind,
+                    data,
+                    holds: Some(0),
+                },
+            );
+            id
+        });
+        self.hold(id, hold);
+        id
+    }
+
+    /// Adds `id` to `hold`'s, or keeps it for good if `hold` is `None`.
+    fn hold(&mut self, id: u64, hold: Option<&mut HashSet<u64>>) {
+        let Some(e) = self.entries.get_mut(&id) else {
+            return;
+        };
+        match hold {
+            None => e.holds = None,
+            Some(ids) => {
+                if let Some(n) = &mut e.holds
+                    && ids.insert(id)
+                {
+                    *n += 1;
+                }
+            }
+        }
+    }
+
+    /// Drops a hold of each of `ids`, freeing those it was the last of.
+    fn release(&mut self, ids: impl IntoIterator<Item = u64>) {
+        for id in ids {
+            let Some(e) = self.entries.get_mut(&id) else {
+                continue;
+            };
+            let Some(n) = &mut e.holds else {
+                continue;
+            };
+            *n -= 1;
+            if *n == 0 {
+                let e = self.entries.remove(&id).expect("an entry");
+                if e.kind != EphemeralKind::Anonymous {
+                    self.ids.remove(&(e.kind, e.data));
+                }
+            }
+        }
+    }
+}
+
+/// A hold of [ephemeral](Graph::ephemeral_value) ids, which are freed once
+/// no hold has them, rather than kept while the graph is open: of a query's
+/// constants and the values it computes, or of an overlay's nodes.
+/// Cloning it shares it; it lets go of its ids when the last clone drops.
+#[derive(Clone)]
+pub struct EphemeralHold(Arc<HoldInner>);
+
+struct HoldInner {
+    table: Arc<std::sync::Mutex<Ephemeral>>,
+    ids: std::sync::Mutex<HashSet<u64>>,
+}
+
+impl Drop for HoldInner {
+    fn drop(&mut self) {
+        let ids = std::mem::take(self.ids.get_mut().unwrap_or_else(|e| e.into_inner()));
+        if !ids.is_empty() {
+            let mut t = self.table.lock().unwrap_or_else(|e| e.into_inner());
+            t.release(ids);
+        }
+    }
+}
+
+impl fmt::Debug for EphemeralHold {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EphemeralHold")
+    }
+}
+
+impl EphemeralHold {
+    /// [`Graph::ephemeral_value`], held by this hold rather than kept.
+    pub fn value(&self, g: &Graph, data: &[u8]) -> u64 {
+        if let Some(id) = g.find_value(data) {
             return id;
         }
-        let id = EPHEMERAL | self.data.len() as u64;
-        self.data.push((kind, data.into()));
-        if kind != EphemeralKind::Anonymous {
-            self.ids.insert((kind, data.into()), id);
+        self.id(g, EphemeralKind::Value, data)
+    }
+
+    /// [`Graph::ephemeral_key`], held by this hold rather than kept.
+    pub fn key(&self, g: &Graph, key: &[u8]) -> u64 {
+        if let Some(id) = g.find_by_key(key) {
+            return id;
         }
-        id
+        self.id(g, EphemeralKind::Key, key)
+    }
+
+    /// [`Graph::ephemeral_node`], held by this hold rather than kept.
+    pub fn node(&self, g: &Graph) -> u64 {
+        self.id(g, EphemeralKind::Anonymous, &[])
+    }
+
+    /// Holds `id`, if it is an ephemeral one not yet freed, as long as this
+    /// hold: an id given by another, which something of this one's names.
+    pub fn retain(&self, id: u64) {
+        if id & EPHEMERAL == 0 {
+            return;
+        }
+        let mut t = self.0.table.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ids = self.0.ids.lock().unwrap_or_else(|e| e.into_inner());
+        t.hold(id, Some(&mut ids));
+    }
+
+    /// Whether `self` and `other` are the same hold.
+    pub fn same(&self, other: &EphemeralHold) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    fn id(&self, g: &Graph, kind: EphemeralKind, data: &[u8]) -> u64 {
+        debug_assert!(
+            Arc::ptr_eq(&self.0.table, &g.ephemeral),
+            "a hold of another graph"
+        );
+        let mut t = self.0.table.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ids = self.0.ids.lock().unwrap_or_else(|e| e.into_inner());
+        t.id(kind, data, Some(&mut ids))
+    }
+}
+
+/// The [holds](EphemeralHold) of the ephemeral ids a result names, which it
+/// keeps while it lives.  They compare equal to any others, so that results
+/// compare by what they name.
+#[derive(Clone, Default)]
+pub struct Holds(Vec<EphemeralHold>);
+
+impl Holds {
+    /// The holds of what `query` gives, and of the overlay it reads, if any.
+    pub fn of(query: &crate::query::Query, overlay: Option<&crate::query::Overlay>) -> Holds {
+        let mut out = overlay.map(|o| o.holds()).unwrap_or_default();
+        if let Some(h) = query.ephemeral_hold() {
+            out.push(h);
+        }
+        out
+    }
+
+    /// Adds `hold`, if not already here.
+    pub fn push(&mut self, hold: &EphemeralHold) {
+        if !self.0.iter().any(|h| h.same(hold)) {
+            self.0.push(hold.clone());
+        }
+    }
+
+    /// Adds `other`'s.
+    pub fn extend(&mut self, other: &Holds) {
+        for h in &other.0 {
+            self.push(h);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl PartialEq for Holds {
+    fn eq(&self, _: &Holds) -> bool {
+        true
+    }
+}
+
+impl fmt::Debug for Holds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Holds({})", self.0.len())
     }
 }
 
@@ -953,21 +1139,23 @@ impl Graph {
     /// link, has no key and is no entry.  So a query can compute values (a
     /// count, a rank) and compare them by id to the graph's, or to
     /// constants that aren't in the graph.  A data's ephemeral id stays the
-    /// same while the graph is open, even if the value is added to the
-    /// graph later (then it has two ids).
+    /// same while it is held, even if the value is added to the graph later
+    /// (then it has two ids).  One given here is kept while the graph is
+    /// open; one given by an [`EphemeralHold`] (see
+    /// [`ephemeral_hold`](Self::ephemeral_hold)) only while a hold has it.
     pub fn ephemeral_value(&self, data: &[u8]) -> u64 {
         if let Some(id) = self.find_value(data) {
             return id;
         }
         let mut t = self.ephemeral.lock().unwrap_or_else(|e| e.into_inner());
-        t.id(EphemeralKind::Value, data)
+        t.id(EphemeralKind::Value, data, None)
     }
 
     /// A new ephemeral id with no data or key: a node, or a link, of an
     /// overlay (see [`query::Overlay`](crate::query::Overlay)).
     pub fn ephemeral_node(&self) -> u64 {
         let mut t = self.ephemeral.lock().unwrap_or_else(|e| e.into_inner());
-        t.id(EphemeralKind::Anonymous, &[])
+        t.id(EphemeralKind::Anonymous, &[], None)
     }
 
     /// The node with `key`: the graph's, or else an ephemeral one's, as
@@ -978,16 +1166,26 @@ impl Graph {
             return id;
         }
         let mut t = self.ephemeral.lock().unwrap_or_else(|e| e.into_inner());
-        t.id(EphemeralKind::Key, key)
+        t.id(EphemeralKind::Key, key, None)
+    }
+
+    /// A new hold of ephemeral ids: those it gives, and those it
+    /// [retains](EphemeralHold::retain), are freed once no hold has them.
+    pub fn ephemeral_hold(&self) -> EphemeralHold {
+        EphemeralHold(Arc::new(HoldInner {
+            table: Arc::clone(&self.ephemeral),
+            ids: Default::default(),
+        }))
     }
 
     /// The number of ephemeral values, keys and nodes the graph and its
-    /// readers hold: they are kept until the graph is dropped.
+    /// readers hold: those kept while the graph is open, and those a hold
+    /// has.
     pub fn ephemeral_count(&self) -> usize {
         self.ephemeral
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .data
+            .entries
             .len()
     }
 
@@ -995,13 +1193,20 @@ impl Graph {
     /// node.
     fn ephemeral_data(&self, id: u64, key: bool) -> Option<Vec<u8>> {
         let t = self.ephemeral.lock().unwrap_or_else(|e| e.into_inner());
-        let (kind, data) = t.data.get((id & !EPHEMERAL) as usize)?;
+        let Some(e) = t.entries.get(&id) else {
+            // Something naming an id should hold it.
+            debug_assert!(
+                id & !EPHEMERAL >= t.next,
+                "ephemeral id {id:#x} read once freed"
+            );
+            return None;
+        };
         let want = if key {
             EphemeralKind::Key
         } else {
             EphemeralKind::Value
         };
-        (*kind == want).then(|| data.to_vec())
+        (e.kind == want).then(|| e.data.to_vec())
     }
 
     /// The entity whose key is `key`.

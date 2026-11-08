@@ -1,8 +1,11 @@
 -- Values a query computes that the database doesn't have are held in
--- memory, and \info counts them: here the count 2 and the key friends.
--- Running the query again finds the same ones.
+-- memory while something names them, and \info counts them.  A query's
+-- (here the count 2 and the key friends) are freed once it is done.
 insert /a knows /b . /a knows /c
 lookup ?s knows ?x . COUNT(?s friends ?x)
 \info
-lookup ?s knows ?x . COUNT(?s friends ?x)
+-- A graph's last as long as it does: its links, and the node /d.
+SET g = { /a knows /d }
+\info
+SET g = { /a knows /b }
 \info

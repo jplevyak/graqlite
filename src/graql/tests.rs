@@ -1705,6 +1705,7 @@ fn texts(g: &Graph, out: &Output) -> Vec<Vec<String>> {
                     .iter()
                     .map(|r| r.iter().map(|&id| Cell::of_id(id)).collect())
                     .collect(),
+                holds: Default::default(),
             };
             table(g, &as_table)
         }
@@ -1857,13 +1858,21 @@ fn prepared_statements() {
     };
     // The output, with its rows in order, as a plan of its own may differ.
     let normal = |out: Output| match out {
-        Output::Rows { vars, mut rows } => {
+        Output::Rows {
+            vars,
+            mut rows,
+            holds,
+        } => {
             rows.sort();
-            Output::Rows { vars, rows }
+            Output::Rows { vars, rows, holds }
         }
-        Output::Table { vars, mut rows } => {
+        Output::Table {
+            vars,
+            mut rows,
+            holds,
+        } => {
             rows.sort_by_key(|r| format!("{r:?}"));
-            Output::Table { vars, rows }
+            Output::Table { vars, rows, holds }
         }
         out => out,
     };
@@ -2592,6 +2601,45 @@ fn aggregates_as_links() {
         });
         assert!(run.is_err(), "{text}");
     }
+}
+
+#[test]
+fn queries_free_the_ephemeral_values_they_compute() {
+    let mut g = graph();
+    let mut s = Session::new();
+    for i in 1..=20 {
+        s.execute(&mut g, &format!("insert /s{i} knows /x{i}"))
+            .unwrap();
+        // A count, a rank and a constant the graph hasn't, new each time.
+        let statements = [
+            "lookup ?s knows ?x . COUNT(?t friends ?x) . ?t knows ?x".to_string(),
+            "lookup ?s knows ?x . RANK(?s place ?x)".to_string(),
+            format!("select ?s where ?s knows \"nothing {i}\""),
+        ];
+        for statement in &statements {
+            let out = s.execute(&mut g, statement).unwrap();
+            // Held while the output is: it reads them.
+            assert!(g.ephemeral_count() > 0, "{statement}");
+            let _ = format!("{:?}", texts_all(&g, &out));
+            drop(out);
+            assert_eq!(g.ephemeral_count(), 0, "{statement}");
+        }
+    }
+    // A graph's, while it is set: its link, and the keys not in the graph.
+    s.execute(&mut g, "SET g = { /a knows /new }").unwrap();
+    assert_eq!(g.ephemeral_count(), 3);
+    s.execute(&mut g, "SET g = { /s1 knows /x1 }").unwrap();
+    assert_eq!(g.ephemeral_count(), 1);
+}
+
+/// The text of each output's rows or links.
+fn texts_all(g: &Graph, outs: &[Output]) -> Vec<String> {
+    outs.iter()
+        .map(|o| match o {
+            Output::Graph(r) => format!("{:?}", r.links.len()),
+            o => format!("{:?}", texts(g, o)),
+        })
+        .collect()
 }
 
 #[test]

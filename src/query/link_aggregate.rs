@@ -129,7 +129,12 @@ impl LinkAggregate {
 
     /// The tuples of its relation, `(s, v[, scope])`, from `rows` of its
     /// head, and the rows each folds.
-    pub(crate) fn tuples(&self, g: &Graph, rows: &[Vec<u64>]) -> Vec<(Vec<u64>, Vec<usize>)> {
+    pub(crate) fn tuples(
+        &self,
+        q: &Query,
+        g: &Graph,
+        rows: &[Vec<u64>],
+    ) -> Vec<(Vec<u64>, Vec<usize>)> {
         let scoped = self.scope.is_some();
         // The rows of each subject and scope, in order.
         let mut order = Vec::new();
@@ -167,7 +172,7 @@ impl LinkAggregate {
                     .iter()
                     .map(|&i| vec![Cell::of_id(rows[i][1])])
                     .collect();
-                if let Some(v) = value_id(g, aggregate::fold(g, &a, &cells)) {
+                if let Some(v) = value_id(q, g, aggregate::fold(g, &a, &cells)) {
                     out.push((tuple(key.0, v, key.1), members.clone()));
                 }
             }
@@ -224,7 +229,7 @@ impl LinkAggregate {
                     LinkFunction::DenseRank => dense,
                     _ => i,
                 };
-                let v = g.ephemeral_value(r.to_string().as_bytes());
+                let v = q.ephemeral_value(g, r.to_string().as_bytes());
                 out.push((tuple(*s, v, scope), groups[&(*s, scope)].clone()));
             }
         }
@@ -234,11 +239,11 @@ impl LinkAggregate {
 
 /// The id of an aggregate's value: an entry, or a number's value, ephemeral
 /// if the graph doesn't have it.
-fn value_id(g: &Graph, c: Cell) -> Option<u64> {
+fn value_id(q: &Query, g: &Graph, c: Cell) -> Option<u64> {
     match c {
         Cell::Id(id) => Some(id),
         Cell::Unbound => None,
-        c => Some(g.ephemeral_value(c.text(g)?.as_bytes())),
+        c => Some(q.ephemeral_value(g, c.text(g)?.as_bytes())),
     }
 }
 

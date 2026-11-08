@@ -225,7 +225,8 @@
 //!   folds the rows of the pattern without those patterns, those of later
 //!   aggregates, and what uses variables only they bind.  Counts and ranks
 //!   not in the graph are ephemeral values (see
-//!   [`Graph::ephemeral_value`]), written as values when inserted.  In a
+//!   [`Graph::ephemeral_value`]), written as values when inserted, held by
+//!   the statement's query and its output, and freed with them.  In a
 //!   statement's pattern or a rule's body, not within `or`, `not`,
 //!   `optional`, `as of` or `in` (see
 //!   [`query::LinkAggregate`](crate::query::LinkAggregate)).
@@ -240,7 +241,8 @@
 //!   name = graph G` names one; `select … from graph G where …` and `lookup`
 //!   / `verify … in graph G` read one; `insert graph G [into g]` writes one.
 //!   A graph's values, keys and nodes not in the database are ephemeral
-//!   (see [`Graph::ephemeral_value`]), made when it is inserted.
+//!   (see [`Graph::ephemeral_value`]), held while it is, and made when it
+//!   is inserted.
 //! - `data G` sets the graph the session reads and writes: an overlay, such
 //!   as `{}` for scratch data never written, or `database` again.
 //!   `default G` sets the graph every graph read is over, such as a schema;
@@ -272,7 +274,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use crate::graph::{self, Graph};
+use crate::graph::{self, EphemeralHold, Graph, Holds};
 use crate::query::ResultGraph;
 use crate::query::aggregate::{Cell, Function};
 use crate::query::expr::Expr as QExpr;
@@ -3058,6 +3060,11 @@ struct Lowering<'g> {
 }
 
 impl Lowering<'_> {
+    /// The hold of the query's ephemeral ids.
+    fn hold(&self) -> &EphemeralHold {
+        self.query.ephemeral_hold().expect("a hold")
+    }
+
     /// The aggregates deriving links collected, for the query.
     fn link_aggregates(&mut self) -> Result<Vec<crate::query::LinkAggregate>> {
         use crate::query::{LinkAggregate, LinkFunction};
@@ -3082,8 +3089,8 @@ impl Lowering<'_> {
             };
             let (s, o) = (var(&s, "subject")?, var(&o, "object")?);
             let predicate = match &pr {
-                Node::Value(v) => self.g.ephemeral_value(v.as_bytes()),
-                Node::Key(k) => self.g.ephemeral_key(k.as_bytes()),
+                Node::Value(v) => self.hold().value(self.g, v.as_bytes()),
+                Node::Key(k) => self.hold().key(self.g, k.as_bytes()),
                 Node::Id(id) => *id,
                 _ => {
                     return Err(Error::Invalid(
@@ -3331,10 +3338,10 @@ impl Lowering<'_> {
             Node::Var(v) | Node::Blank(v) => Term::Var(self.var(v)),
             // A key the graph doesn't have may be an aggregate's predicate:
             // an ephemeral one.
-            Node::Key(k) => Term::Id(self.g.ephemeral_key(k.as_bytes())),
+            Node::Key(k) => Term::Id(self.hold().key(self.g, k.as_bytes())),
             // A value the graph doesn't have may be computed (a count, a
             // rank), and compared by id: an ephemeral value.
-            Node::Value(v) | Node::Symbol(v) => Term::Id(self.g.ephemeral_value(v.as_bytes())),
+            Node::Value(v) | Node::Symbol(v) => Term::Id(self.hold().value(self.g, v.as_bytes())),
             Node::Id(id) => Term::Id(*id),
             // Given when the query runs, unless bound before lowering (see
             // `Statement::bind`).
@@ -3654,9 +3661,13 @@ fn lower_full(
     // rule that cannot be evaluated affects only the queries that use it.
     let reached = reachable(rules, &whole);
     let rules: Vec<&RuleDef> = rules.iter().filter(|r| reached.contains(&r.name)).collect();
+    let mut query = Query::new();
+    // The constants it doesn't have, and the values it computes, are held by
+    // the query, and freed with it.
+    query.hold_ephemeral(g.ephemeral_hold());
     let mut l = Lowering {
         g,
-        query: Query::new(),
+        query,
         vars: HashMap::new(),
         relations: HashMap::new(),
         as_of: None,
@@ -4222,11 +4233,15 @@ pub enum Output {
     Rows {
         vars: Vec<String>,
         rows: Vec<Vec<u64>>,
+        /// The holds of the ephemeral ids the rows name, which they keep.
+        holds: Holds,
     },
     /// The rows of a `select` with aggregates: computed values, and entries.
     Table {
         vars: Vec<String>,
         rows: Vec<Vec<Cell>>,
+        /// The holds of the ephemeral ids the cells name, which they keep.
+        holds: Holds,
     },
     /// Whether a `verify`'s pattern has a match.
     Verified(bool),
@@ -4761,13 +4776,12 @@ impl Session {
         triples: &[Pattern],
         subgraph: Option<&Node>,
     ) -> Result<usize> {
+        let h = o.ephemeral_hold(g).clone();
         let mut blanks: HashMap<String, u64> = HashMap::new();
         let mut id = |n: &Node| -> Result<u64> {
             Ok(match n {
-                Node::Blank(b) => *blanks
-                    .entry(b.clone())
-                    .or_insert_with(|| g.ephemeral_node()),
-                n => ephemeral(g, n).ok_or_else(|| {
+                Node::Blank(b) => *blanks.entry(b.clone()).or_insert_with(|| h.node(g)),
+                n => ephemeral(g, &h, n).ok_or_else(|| {
                     Error::Invalid(format!(
                         "{} in a graph isn't a constant",
                         Expr::Node(n.clone())
@@ -4984,22 +4998,27 @@ impl Session {
             }
             Statement::Select { .. } => {
                 let (q, vars) = statement.query_with(g, rules)?;
+                let holds = Holds::of(&q, view.as_deref());
                 Ok(match (q.computes(), &view) {
                     (true, None) => Output::Table {
                         vars,
                         rows: q.cells(g)?,
+                        holds,
                     },
                     (true, Some(v)) => Output::Table {
                         vars,
                         rows: q.cells_over(g, v)?,
+                        holds,
                     },
                     (false, None) => Output::Rows {
                         vars,
                         rows: q.run(g)?,
+                        holds,
                     },
                     (false, Some(v)) => Output::Rows {
                         vars,
                         rows: q.run_over(g, v)?,
+                        holds,
                     },
                 })
             }
@@ -5334,7 +5353,8 @@ impl Session {
     ) -> Result<usize> {
         let mut data = self.data.take().expect("an overlay");
         let o = Arc::make_mut(&mut data);
-        let statement_graph = graph.and_then(|n| ephemeral(g, n));
+        let h = o.ephemeral_hold(g).clone();
+        let statement_graph = graph.and_then(|n| ephemeral(g, &h, n));
         let mut count = 0;
         for row in rows {
             let mut blanks: HashMap<String, u64> = HashMap::new();
@@ -5353,12 +5373,12 @@ impl Session {
                         }
                         Node::Var(_) => None,
                         Node::Blank(b) if insert => {
-                            let id = g.ephemeral_node();
+                            let id = h.node(g);
                             blanks.insert(b.clone(), id);
                             Some(id)
                         }
                         Node::Blank(_) => None,
-                        n => ephemeral(g, n),
+                        n => ephemeral(g, &h, n),
                     }
                 };
                 let (Some(s), Some(p), Some(ob)) = (id(s), id(p), id(ob)) else {
@@ -5428,12 +5448,12 @@ impl Session {
 }
 
 /// The entry a constant node names, or an ephemeral one (see
-/// [`Graph::ephemeral_value`]) if the graph hasn't it; `None` for a
-/// variable, blank node or parameter.
-fn ephemeral(g: &Graph, n: &Node) -> Option<u64> {
+/// [`Graph::ephemeral_value`]) held by `h` if the graph hasn't it; `None`
+/// for a variable, blank node or parameter.
+fn ephemeral(g: &Graph, h: &EphemeralHold, n: &Node) -> Option<u64> {
     match n {
-        Node::Key(k) => Some(g.ephemeral_key(k.as_bytes())),
-        Node::Value(v) | Node::Symbol(v) => Some(g.ephemeral_value(v.as_bytes())),
+        Node::Key(k) => Some(h.key(g, k.as_bytes())),
+        Node::Value(v) | Node::Symbol(v) => Some(h.value(g, v.as_bytes())),
         Node::Id(id) => Some(*id),
         Node::Var(_) | Node::Blank(_) | Node::Param(_) => None,
     }

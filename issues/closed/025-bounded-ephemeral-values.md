@@ -1,6 +1,6 @@
 # Ephemeral values grow without bound
 
-**Status:** open · **Size:** medium · **Related:** [015](closed/015-graph-results.md) (computed values), [017](closed/017-graph-layering.md) (overlays' ephemeral nodes)
+**Status:** closed · **Size:** medium · **Related:** [015](015-graph-results.md) (computed values), [017](017-graph-layering.md) (overlays' ephemeral nodes)
 
 ## Problem
 
@@ -43,8 +43,8 @@ entries in `\info` would show how fast real sessions grow.
 - [x] `ephemeral_data` returns owned data; remove the unsafe lifetime
       extension
 - [x] Count ephemeral entries in `\info`
-- [ ] Per-query (and per-overlay) arenas for computed values
-- [ ] A test: a loop of aggregate queries on an open graph does not grow
+- [x] Per-query (and per-overlay) arenas for computed values
+- [x] A test: a loop of aggregate queries on an open graph does not grow
       its ephemeral table
 
 ## Progress
@@ -67,3 +67,42 @@ Next is part 2, the per-query and per-overlay arenas. The count shows
 that a repeated query doesn't grow the table. Distinct results do: each
 new count or rank adds one entry, and each overlay node or link one.
 
+## As implemented
+
+Part 2 holds ids rather than giving each query an arena of its own, so
+that an id stays the same for the same data across everything holding
+it, as before:
+
+- **`EphemeralHold`** (`Graph::ephemeral_hold`): a shared, counted set of
+  ephemeral ids. `hold.value`, `key` and `node` give ids as
+  `Graph::ephemeral_*` do, and `retain` holds one given elsewhere. An
+  entry is freed when the last hold of it drops. Ids are never given
+  again, so a stale one names nothing, never other data. In debug builds,
+  reading a freed id panics, so every test also checks that nothing reads
+  an id it doesn't hold.
+- **Ids given without a hold** (`Graph::ephemeral_value` and friends) are
+  kept while the graph is open, as before: a `Query` built by hand gives
+  them unless given one with `Query::hold_ephemeral`.
+- **GraQL** gives each lowered query a hold, for its constants not in the
+  graph and the values it computes (counts, ranks, parameters' values).
+  `Output::Rows`, `Output::Table` and `ResultGraph` carry `holds`, of the
+  query and the overlay read, so results read after the statement still
+  resolve. A field compares equal to any other, so outputs still compare
+  by content.
+- **Overlays** hold their links' ids, and retain the ephemeral nodes their
+  facts, authors and subgraphs name. `over` keeps both overlays' holds.
+
+`tests/cli/ephemeral.graql` shows `\info` with nothing held after a
+query, and a `SET` graph's entries held until it is replaced.
+`queries_free_the_ephemeral_values_they_compute` runs 60 statements, each
+with new counts, ranks or constants, and checks that nothing is left
+after each one.
+
+A prepared statement or a standing query keeps the values it computes
+until it is dropped, as its one query holds them. A hold per execution
+would bound that too, if long-lived prepared statements turn out to
+accumulate.
+
+## Closed
+
+Closed by the commit adding `EphemeralHold`.

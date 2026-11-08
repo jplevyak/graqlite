@@ -2029,7 +2029,9 @@ impl Plan {
                         Cell::Unbound => 0,
                         other => {
                             cells.push((v.0, other.clone()));
-                            other.text(g).map_or(0, |t| g.ephemeral_value(t.as_bytes()))
+                            other
+                                .text(g)
+                                .map_or(0, |t| q.ephemeral_value(g, t.as_bytes()))
                         }
                     };
                 }
@@ -2333,6 +2335,7 @@ impl Plan {
                 .chain(derived)
                 .collect(),
             nodes: entries.into_iter().collect(),
+            holds: crate::graph::Holds::of(q, overlay.map(|o| &**o)),
         })
     }
 

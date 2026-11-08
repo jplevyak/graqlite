@@ -159,7 +159,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::graph::{Error, Graph, Result};
+use crate::graph::{EphemeralHold, Error, Graph, Result};
 use aggregate::{Cell, Function};
 
 pub mod aggregate;
@@ -988,6 +988,9 @@ pub struct Query {
     /// The nested limits: each variable's values kept, in order (see
     /// [`limit_values`](Self::limit_values)).
     value_limits: Vec<(Var, usize, usize)>,
+    /// The hold of the ephemeral ids it gives (see
+    /// [`hold_ephemeral`](Self::hold_ephemeral)).
+    held: Option<EphemeralHold>,
 }
 
 /// How a variable's value is computed, after the rows are matched.
@@ -1057,6 +1060,29 @@ impl Query {
     /// rows are those of the rest of the group: so a query with an
     /// aggregate whose links it doesn't match has the rows it has without
     /// it, and its [graph](Self::graph) has the links.
+    /// Holds the ephemeral ids the query gives (the values it computes, and
+    /// a parameter's value not in the graph) with `hold`, so that they are
+    /// freed with it, rather than kept while the graph is open (see
+    /// [`Graph::ephemeral_hold`]).  Its constants may be held by it too.
+    pub fn hold_ephemeral(&mut self, hold: EphemeralHold) -> &mut Self {
+        self.held = Some(hold);
+        self
+    }
+
+    /// The hold of the ephemeral ids it gives, if given one.
+    pub fn ephemeral_hold(&self) -> Option<&EphemeralHold> {
+        self.held.as_ref()
+    }
+
+    /// The id of the value with `data`, ephemeral if the graph hasn't it:
+    /// held by the query's hold, if any.
+    pub(crate) fn ephemeral_value(&self, g: &Graph, data: &[u8]) -> u64 {
+        match &self.held {
+            Some(h) => h.value(g, data),
+            None => g.ephemeral_value(data),
+        }
+    }
+
     pub fn link_aggregate(&mut self, a: LinkAggregate) -> &mut Self {
         self.link_aggregates.push(a);
         self

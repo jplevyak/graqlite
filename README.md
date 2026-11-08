@@ -220,7 +220,10 @@ batches.
   result graph (`Overlay::of_graph`) and written (`insert_into`).  Any plan
   runs beneath one (`execute_over`, `q.run_over`, `q.graph_over`), its rules
   and paths too.  Their nodes, values and keys not in the database have
-  ephemeral ids (`Graph::ephemeral_node`, `ephemeral_value`).
+  ephemeral ids (`Graph::ephemeral_node`, `ephemeral_value`), held in
+  memory by the overlay (`EphemeralHold`) and freed with it.  GraQL's
+  queries hold the values they compute the same way, as do their results
+  (`Output::Rows`'s `holds`), so a long session doesn't accumulate them.
 - **Standing queries** (`StandingQuery`) keep a query's rows up to date as
   entries are committed, from the newly committed links rather than
   evaluating it again; `MaintainedSubgraph` keeps a subgraph as a template's

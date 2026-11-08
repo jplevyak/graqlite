@@ -307,7 +307,7 @@ fn evaluate_component(
         )?;
         let heads: Vec<Vec<u64>> = rows.iter().map(|(r, _)| r.clone()).collect();
         let mut set = HashSet::new();
-        for (t, members) in a.tuples(g, &heads) {
+        for (t, members) in a.tuples(q, g, &heads) {
             if record {
                 derived(
                     rule.relation,

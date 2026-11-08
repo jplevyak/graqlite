@@ -82,6 +82,8 @@ pub enum Derivation {
 pub struct ResultGraph {
     pub links: Vec<ResultLink>,
     pub nodes: Vec<u64>,
+    /// The holds of the ephemeral ids it names, which it keeps.
+    pub holds: crate::graph::Holds,
 }
 
 impl ResultGraph {
