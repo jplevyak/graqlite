@@ -289,6 +289,10 @@ pub struct Graph {
     /// The vector indexes declared (see
     /// [`create_vector_index`](Self::create_vector_index)).
     vector_indexes: indexes::VectorIndexes,
+    /// Their searches, shared with the readers; and the predicates the
+    /// writer has appended links of since its last commit, searched exactly.
+    searches: vectors::SharedSearches,
+    vector_dirty: HashSet<u64>,
 }
 
 /// The bit set in the id of a [ephemeral value](Graph::ephemeral_value):
@@ -549,8 +553,13 @@ impl Graph {
             snapshots: Default::default(),
             snapshot: None,
             vector_indexes: Arc::new([]),
+            searches: Default::default(),
+            vector_dirty: HashSet::new(),
         };
         g.load_vector_indexes()?;
+        if !g.is_reader() {
+            g.feed_vector_searches()?;
+        }
         Ok(g)
     }
 
@@ -583,6 +592,7 @@ impl Graph {
     pub fn commit_at(&mut self, time: crate::record::LinkTime) -> Result<()> {
         self.local.commit()?;
         self.committed = Arc::new((*self.stats).clone());
+        self.feed_vector_searches()?;
         let next_id = self.next_id();
         self.times.record(time, next_id);
         self.publish();
@@ -613,6 +623,8 @@ impl Graph {
             snapshots: Arc::clone(&self.snapshots),
             snapshot: Some(end),
             vector_indexes: Arc::new([]),
+            searches: Arc::clone(&self.searches),
+            vector_dirty: HashSet::new(),
         };
         // As committed: the writer's may include some since.
         if r.load_vector_indexes().is_err() {
@@ -682,6 +694,7 @@ impl Graph {
         self.local.log_mut().abandon_commit()?;
         self.stats = Arc::new((*self.committed).clone());
         self.load_vector_indexes()?;
+        self.vector_dirty.clear();
         // The ids abandoned are committed as nodes.
         self.publish();
         Ok(())
@@ -721,6 +734,7 @@ impl Graph {
                 self.compact(horizon)?;
             }
         }
+        self.rebuild_vector_searches();
         self.save_stats()
     }
 
@@ -895,6 +909,7 @@ impl Graph {
         self.local.log_mut().append(record)?;
         tuple_index::index_records(&mut self.local, std::slice::from_ref(record))?;
         Arc::make_mut(&mut self.stats).add(record, replaces);
+        self.vector_appended(record);
         Ok(record.id())
     }
 
@@ -1640,6 +1655,9 @@ impl Drop for Graph {
 mod indexes;
 #[cfg(test)]
 mod tests;
+mod vectors;
+
+pub use vectors::VectorSearch;
 
 pub use indexes::{
     DIMS_PREDICATE, EF_PREDICATE, INDEXES_KEY, M_PREDICATE, METRIC_PREDICATE,

@@ -1382,6 +1382,8 @@ fn vector_indexes_are_declared_checked_and_kept() {
     drop(g);
     let mut g = Graph::open(Some(&prefix), Options::default()).unwrap();
     assert_eq!(g.vector_indexes(), std::slice::from_ref(&index));
+    // Its search is built again, of the live links' vectors.
+    assert_eq!(g.vector_search(p).unwrap().hnsw.live_len(), 1);
     // And in a snapshot.
     let mut snapshot = Vec::new();
     g.snapshot(&mut snapshot).unwrap();

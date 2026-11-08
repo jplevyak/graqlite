@@ -13,6 +13,7 @@ mod error;
 pub mod graph;
 #[cfg(all(unix, target_pointer_width = "64"))]
 pub mod graql;
+pub mod hnsw;
 #[cfg(all(unix, target_pointer_width = "64"))]
 pub mod local;
 #[cfg(all(unix, target_pointer_width = "64"))]

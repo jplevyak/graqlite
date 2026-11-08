@@ -4157,3 +4157,141 @@ fn nearest_sees_overlays_and_history() {
     // A standing query can't search.
     assert!(StandingQuery::new(&nearest(None), &g).is_err());
 }
+
+#[test]
+fn nearest_uses_the_vector_index_as_the_scan_would() {
+    use crate::graph::VectorIndex;
+    use crate::vector::{self, Metric};
+    let mut g = graph();
+    let mut rng = Rng(11);
+    let p = g.value(b"embedding").unwrap();
+    let mut random = || -> Vec<f32> {
+        (0..8)
+            .map(|_| (rng.below(2001) as f32 - 1000.0) / 1000.0)
+            .collect()
+    };
+    let mut vectors = Vec::new();
+    let mut first_link = 0;
+    for _ in 0..1000 {
+        let s = g.node().unwrap();
+        let v = random();
+        let id = g.value(&vector::encode(&v)).unwrap();
+        let l = g.link(s, p, id).unwrap();
+        if first_link == 0 {
+            first_link = l;
+        }
+        vectors.push((s, id, v));
+    }
+    g.create_vector_index(&VectorIndex::new(p, 8, Metric::L2))
+        .unwrap();
+    // Declared but not committed: searched by scanning.
+    assert!(g.vector_search(p).is_none());
+    g.commit().unwrap();
+    assert_eq!(g.vector_search(p).unwrap().hnsw.live_len(), 1000);
+    let query = |as_of: Option<u64>, k: usize| {
+        let mut q = Query::new();
+        let (v, d, s) = (q.var("v"), q.var("d"), q.var("s"));
+        let qv = q.param("q");
+        let mut n = Nearest::new(p, qv, k, v, d).metric(Metric::L2);
+        n.as_of = as_of;
+        q.group().nearest(n, s);
+        q.select([v]);
+        q
+    };
+    let run = |g: &Graph, q: &Query, at: &[f32]| -> Vec<u64> {
+        q.plan(g)
+            .unwrap()
+            .execute_values(g, &[aggregate::Cell::Text(vector::format(at))])
+            .map(|r| r.unwrap()[0])
+            .collect()
+    };
+    let exact = |live: &[(u64, u64, Vec<f32>)], at: &[f32], k: usize| -> Vec<u64> {
+        let mut all: Vec<(f64, u64)> = live
+            .iter()
+            .map(|(_, id, v)| (vector::distance(at, v, Metric::L2).unwrap(), *id))
+            .collect();
+        all.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        all.into_iter().take(k).map(|a| a.1).collect()
+    };
+    // The plan says the index is used; it finds what the scan would.
+    let explained = query(None, 10).plan(&g).unwrap().explain();
+    assert!(
+        explained.contains("via the vector index of 1000 vectors"),
+        "{explained}"
+    );
+    let mut found = 0;
+    for _ in 0..20 {
+        let at = random();
+        let got = run(&g, &query(None, 10), &at);
+        let want = exact(&vectors, &at, 10);
+        found += want.iter().filter(|w| got.contains(w)).count();
+    }
+    assert!(found >= 190, "recall {found}/200");
+    // A vector linked but not committed is found, by scanning; then by the
+    // index, once committed.
+    let at = random();
+    let s = g.node().unwrap();
+    let new = g.value(&vector::encode(&at)).unwrap();
+    g.link(s, p, new).unwrap();
+    assert!(g.vector_search(p).is_none());
+    assert_eq!(run(&g, &query(None, 1), &at), vec![new]);
+    g.commit().unwrap();
+    assert!(g.vector_search(p).is_some());
+    assert_eq!(run(&g, &query(None, 1), &at), vec![new]);
+    // Deleted: a reader made before, and a search as of before, still find
+    // it; others don't.
+    let before = g.next_id() - 1;
+    let r = g.reader();
+    g.delete_link(s, p, new).unwrap();
+    g.commit().unwrap();
+    assert_ne!(run(&g, &query(None, 1), &at), vec![new]);
+    assert_eq!(run(&r, &query(None, 1), &at), vec![new]);
+    assert_eq!(run(&g, &query(Some(before), 1), &at), vec![new]);
+    let mut q = query(None, 1);
+    q.as_of(before);
+    assert_eq!(run(&g, &q, &at), vec![new]);
+    // As of before the index was built: by scanning, which finds the same.
+    let first = vectors[0].1;
+    assert_eq!(
+        run(&g, &query(Some(first_link), 1), &vectors[0].2),
+        vec![first]
+    );
+    // Over an overlay with the predicate's links, by scanning.
+    let mut ov = Overlay::new();
+    let vc = ov.ephemeral_hold(&g).value(&g, &vector::encode(&at));
+    let c = g.ephemeral_node();
+    ov.insert(&g, [c, p, vc]);
+    let plan = query(None, 1).plan(&g).unwrap();
+    let rows: Vec<u64> = plan
+        .execute_cells_over(
+            &g,
+            &Arc::new(ov),
+            &[aggregate::Cell::Text(vector::format(&at))],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|r| match r[0] {
+            aggregate::Cell::Id(id) => id,
+            _ => 0,
+        })
+        .collect();
+    assert_eq!(rows, vec![vc]);
+    // Built again once those no longer live are a quarter of it.
+    drop(r);
+    for (s, id, _) in vectors.iter().take(400) {
+        g.delete_link(*s, p, *id).unwrap();
+    }
+    g.commit().unwrap();
+    assert_eq!(g.vector_search(p).unwrap().hnsw.len(), 1001);
+    g.tick().unwrap();
+    let search = g.vector_search(p).unwrap();
+    assert_eq!((search.hnsw.len(), search.hnsw.live_len()), (600, 600));
+    let at = random();
+    let got = run(&g, &query(None, 5), &at);
+    let want = exact(&vectors[400..], &at, 5);
+    assert!(want.iter().filter(|w| got.contains(w)).count() >= 4);
+    // Dropped: by scanning again.
+    g.drop_vector_index(p).unwrap();
+    g.commit().unwrap();
+    assert!(g.vector_search(p).is_none());
+}

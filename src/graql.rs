@@ -200,7 +200,8 @@
 //!   ?d where nearest(embedding $q 10 ?v ?d) . ?doc embedding ?v ; writer
 //!   /ann` (see [`query::Nearest`](crate::query::Nearest)).  It is the `k`
 //!   nearest of all, then joined: fewer, if the rest of the pattern keeps
-//!   fewer.  The search is exact, a scan of the links.
+//!   fewer.  With a vector index on `P` (below), it is the index's search,
+//!   approximate; else exact, a scan of the links.
 //! - `<< s p o >>` is a link node: the live link `s p o`, as a node, to
 //!   make statements about links (`<< /a knows /b >> since 2019`).  Unlike
 //!   an RDF-star quoted triple, the link must be there.  `<< :?l s p o >>`

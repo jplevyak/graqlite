@@ -117,6 +117,35 @@ impl Metric {
     }
 }
 
+/// The dot product of `a` and `b`, in `f32`, in lanes the compiler can
+/// vectorize: fast, for comparing distances; [`distance`] is exact.
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let mut lanes = [0f32; 8];
+    let ((ca, ra), (cb, rb)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    for (x, y) in ca.iter().zip(cb) {
+        for i in 0..8 {
+            lanes[i] += x[i] * y[i];
+        }
+    }
+    let tail: f32 = ra.iter().zip(rb).map(|(x, y)| x * y).sum();
+    lanes.iter().sum::<f32>() + tail
+}
+
+/// The squared Euclidean distance between `a` and `b`, as [`dot`] is
+/// summed.
+pub fn l2_squared(a: &[f32], b: &[f32]) -> f32 {
+    let mut lanes = [0f32; 8];
+    let ((ca, ra), (cb, rb)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    for (x, y) in ca.iter().zip(cb) {
+        for i in 0..8 {
+            let d = x[i] - y[i];
+            lanes[i] += d * d;
+        }
+    }
+    let tail: f32 = ra.iter().zip(rb).map(|(x, y)| (x - y) * (x - y)).sum();
+    lanes.iter().sum::<f32>() + tail
+}
+
 /// The distance between `a` and `b` by `metric`, summed in `f64`.  `None` if
 /// their dimensions differ, or for the cosine of a zero vector.
 pub fn distance(a: &[f32], b: &[f32], metric: Metric) -> Option<f64> {

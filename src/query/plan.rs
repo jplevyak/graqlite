@@ -160,9 +160,13 @@ pub(crate) enum Step {
     },
     /// Joins a search for the values nearest a vector: for each row, those
     /// of the links its `scan` (planned alone, run once) finds.
+    /// The index's search is used instead when it finds the same (see
+    /// `NearestLookup`): `indexed` is its vectors, if the predicate had one
+    /// when planned.
     Nearest {
         nearest: Nearest,
         scan: GroupPlan,
+        indexed: Option<usize>,
         rows: f64,
     },
     Filter(Vec<Filter>),
@@ -448,6 +452,7 @@ fn explain_group(
             Step::Nearest {
                 nearest,
                 scan,
+                indexed,
                 rows,
             } => {
                 let how = if first { "scan" } else { "bind join" };
@@ -456,7 +461,14 @@ fn explain_group(
                     "{pad}{how} {}, rows ~{rows:.0}",
                     q.nearest_name(nearest, name)
                 );
-                let _ = writeln!(out, "{pad}  searching, once:");
+                match indexed {
+                    Some(n) => {
+                        let _ = writeln!(out, "{pad}  via the vector index of {n} vectors, or:");
+                    }
+                    None => {
+                        let _ = writeln!(out, "{pad}  searching, once:");
+                    }
+                }
                 explain_group(q, scan, depth + 2, true, name, out);
                 first = false;
             }
@@ -1307,13 +1319,31 @@ impl Planner<'_, '_> {
                         (n.k as f64).min(found)
                     };
                     let rows = partial.rows * matches;
+                    let indexed = self
+                        .est
+                        .g
+                        .vector_search(n.predicate)
+                        .filter(|s| s.index.metric == n.metric)
+                        .map(|s| s.hnsw.live_len());
+                    // An index's search measures about ef per layer.
+                    let cost = match indexed {
+                        Some(len) => {
+                            let ef = self.est.g.vector_index(n.predicate).map_or(1, |i| i.ef);
+                            partial.rows
+                                * (ef.max(n.k) as f64)
+                                * (len.max(2) as f64).log2()
+                                * DISTANCE_COST
+                        }
+                        None => scan.cost + partial.rows * found * DISTANCE_COST,
+                    };
                     ways.push((
                         Step::Nearest {
                             nearest: n.clone(),
                             scan: scan.clone(),
+                            indexed,
                             rows,
                         },
-                        scan.cost + partial.rows * found * DISTANCE_COST,
+                        cost,
                         rows,
                     ));
                 }

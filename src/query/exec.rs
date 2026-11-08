@@ -492,6 +492,38 @@ struct NearestLookup {
     bound: Vec<bool>,
     /// The values the scan found that are vectors, by id, once found.
     vectors: Option<Vec<(u64, Vec<f32>)>>,
+    /// The index's search, and the id it is as of, if it can be used: once
+    /// known.
+    search: Option<Option<(Arc<crate::graph::VectorSearch>, u64)>>,
+}
+
+impl NearestLookup {
+    /// The index's search, if one finds what the scan would: the graph's
+    /// is up to date for the predicate, by the metric searched, and nothing
+    /// the scan reads differs from it (an overlay with the predicate's
+    /// links, a subgraph, or an `as of` before it was built).
+    fn search(&self, g: &Graph) -> Option<(Arc<crate::graph::VectorSearch>, u64)> {
+        let n = &self.nearest;
+        let search = g.vector_search(n.predicate)?;
+        if search.index.metric != n.metric
+            || n.scan
+                .patterns
+                .iter()
+                .any(|p| p.graph.is_some() || p.author.is_some())
+        {
+            return None;
+        }
+        if let Some(o) = &self.ctx.overlay
+            && (!o.over_database() || o.predicates().contains(&n.predicate))
+        {
+            return None;
+        }
+        let at = match n.as_of.or(self.ctx.as_of) {
+            Some(id) => id.min(g.vector_bound()),
+            None => g.vector_bound(),
+        };
+        (at >= search.floor).then_some((search, at))
+    }
 }
 
 impl Lookup for NearestLookup {
@@ -504,6 +536,17 @@ impl Lookup for NearestLookup {
         let Some(query) = Cell::of_id(query).vector(g) else {
             return Ok(());
         };
+        if self.search.is_none() {
+            self.search = Some(self.search(g));
+        }
+        let mut new = Vec::new();
+        if let Some((search, at)) = self.search.clone().flatten() {
+            let found = search.search(&query, n.k, at).expect("as of its floor");
+            for (id, d) in found {
+                self.push(g, row, id, d, &mut new, out);
+            }
+            return Ok(());
+        }
         if self.vectors.is_none() {
             let unbound = self.ctx.unbound();
             let values = matched(&self.ctx, g, &self.scan, &[n.value], &unbound, None)?;
@@ -526,19 +569,26 @@ impl Lookup for NearestLookup {
             found.truncate(n.k);
         }
         found.sort_unstable_by(order);
-        let mut new = Vec::new();
         for (d, id) in found {
-            let d = Cell::Float(d).data(g).expect("a number");
-            let d = match &self.ctx.hold {
-                Some(h) => h.value(g, &d),
-                None => g.ephemeral_value(&d),
-            };
-            let fields = [(Term::Var(n.value), id), (Term::Var(n.distance), d)];
-            if extend_row(&self.bound, row, fields, &mut new) {
-                out.push(&new);
-            }
+            self.push(g, row, id, d, &mut new, out);
         }
         Ok(())
+    }
+}
+
+impl NearestLookup {
+    /// Extends `row` with the value `id` at distance `d`.
+    fn push(&self, g: &Graph, row: &[u64], id: u64, d: f64, new: &mut Vec<u64>, out: &mut Batch) {
+        let n = &self.nearest;
+        let d = Cell::Float(d).data(g).expect("a number");
+        let d = match &self.ctx.hold {
+            Some(h) => h.value(g, &d),
+            None => g.ephemeral_value(&d),
+        };
+        let fields = [(Term::Var(n.value), id), (Term::Var(n.distance), d)];
+        if extend_row(&self.bound, row, fields, new) {
+            out.push(new);
+        }
     }
 }
 
@@ -1813,6 +1863,7 @@ impl Context {
                             ctx: self.clone(),
                             bound: bound.to_vec(),
                             vectors: None,
+                            search: None,
                         }),
                         in_batch: Batch::new(width),
                         in_pos: 0,

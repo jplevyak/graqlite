@@ -221,7 +221,11 @@ batches.
   of the query joins them.  Vectors are values (`graqlite::vector`).
   `g.create_vector_index(&VectorIndex::new(p, dims, metric))` declares an
   index of `p`'s objects, saved in the graph: their links must then have
-  vectors of its dimension.
+  vectors of its dimension, and searches use its HNSW (`graqlite::hnsw`),
+  in memory, fed at each commit, and searched as of a reader's commit or
+  an `as of`.  What it can't answer exactly as the scan would (links not
+  yet committed, an overlay with the predicate's links, a subgraph) is
+  scanned.
 - **Overlays** (`Overlay`): links held in memory, over the database or
   alone, live or deleting a stored fact, layered (`over`), made from a
   result graph (`Overlay::of_graph`) and written (`insert_into`).  Any plan
@@ -578,6 +582,7 @@ src/
   times.rs            the time of each commit, mapping times to ids, and
                       ISO 8601 times
   vector.rs           vectors as values: encoding, text and distances
+  hnsw.rs             approximate nearest-neighbour search (HNSW), as of an id
   graph.rs            Graph: the graph database API, subgraphs, compaction,
                       readers, ephemeral values (tests in graph/)
   query/              pattern queries: types and builders (mod.rs), the

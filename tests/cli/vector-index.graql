@@ -8,6 +8,7 @@ index vector on embedding dims 2 metric l2 m 8
 index vector on embedding dims 2 metric l2 m 8
 \di
 select ?v, ?d where nearest(embedding "[0, 1]" 1 ?v ?d)
+\explain select ?v, ?d where nearest(embedding "[0, 1]" 1 ?v ?d)
 -- Declared in a transaction, it is rolled back with it.
 \begin
 delete index vector on embedding

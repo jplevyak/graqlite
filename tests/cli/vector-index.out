@@ -13,6 +13,9 @@ INDEX vector on embedding (unchanged)
 ------------+----------
  [0.6, 0.8] | 0.632456
 (1 row)
+scan nearest(embedding "[0, 1]" 1 ?v ?d l2), rows ~1
+  via the vector index of 3 vectors, or:
+    scan (?nearest subject 2 embedding ?v) via predicate index, rows ~3
 BEGIN
 DELETE INDEX vector on embedding
  predicate | dims | metric | m | ef
@@ -33,5 +36,5 @@ DELETE INDEX vector on embedding
 -----------+------+--------+---+----
 (0 rows)
 INDEX vector on embedding
-tests/cli/vector-index.graql:24: error: #797 isn't a vector of 2 dimensions, as its predicate's index needs
+tests/cli/vector-index.graql:25: error: #797 isn't a vector of 2 dimensions, as its predicate's index needs
 [exit 1]

@@ -62,8 +62,9 @@ distance, and a way to ask.
 
 - [x] The vector value encoding, `vector(...)`, `str` of a vector, and
       `distance(a, b, metric)` as an expression function (useful alone)
-- [ ] An HNSW over values in memory, fed by `index_records`, with
-      tombstones, saved and loaded like `stats`
+- [x] An HNSW over values in memory, fed by `index_records`, with
+      tombstones (fed at commits; saving and loading is step 5)
+- [ ] Saved and loaded like `stats`
 - [x] `index vector on P ...` and `delete index`, saved in the graph
 - [x] `nearest(P $q k ?v ?d)` as a built-in relation; `\explain` shows it
       (exact, by a scan, for now)
@@ -84,7 +85,7 @@ distance, and a way to ask.
    `k` given.
 3. `index vector on P …` and `delete index` (done), saved in the graph
    as rules are, and `\di`.
-4. An HNSW of our own (a seeded RNG, so tests are deterministic), fed from
+4. (Done.) An HNSW of our own (a seeded RNG, so tests are deterministic), fed from
    committed records only, so a rollback has nothing to undo; links not
    yet committed are a small list scanned exactly, cleared on rollback.
    Entries carry the ids that added and deleted them, for readers.
@@ -162,6 +163,45 @@ Step 3 is done:
 - Tests: `vector_indexes_are_declared_checked_and_kept` (refusals,
   replacing, rollback, a reader, reopening, a snapshot), the round trips
   of the statements' text, and `tests/cli/vector-index.graql`.
+
+Step 4 is done:
+
+- **`src/hnsw.rs`:** an HNSW of our own, with the paper's heuristic for
+  choosing links, levels from a seeded generator, and each item's ranges
+  of ids over which it is live, so that a search is as of an id: items
+  no longer live are tombstones it passes through, and the beam widens
+  if too few it finds are live. Distances are measured fast in `f32`
+  (`vector::dot`, `l2_squared`, a norm kept per item), and the results
+  measured again exactly, as the scan does, so they are the same digits.
+- **`src/graph/vectors.rs`:** a `VectorSearch` per declared index,
+  shared by the graph and its readers. Fed at each commit from the
+  records committed since: each link with an indexed predicate makes its
+  object live from its id, or ends its range there, by whether a live
+  link with the predicate has it then. So a search as of any id since it
+  was built (its floor) finds what a query as of that id would. Built
+  from the live links on open and when a declaration is committed, and
+  again at `tick` once tombstones are a quarter of it, keeping what the
+  oldest reader may see.
+- **Used when it answers as the scan would:** the writer has appended no
+  links of the predicate since its last commit, no overlay has them, no
+  subgraph is asked for, the metric is the index's, and the search is as
+  of its floor or later. Else the scan. `\explain` says when the index
+  is used, and the planner costs it as about `ef` per layer.
+- **Measured** (release, one core, 20 000 vectors of 384 dimensions):
+  clustered, recall at 10 is 1.0 with `ef` 200, a search 0.37 ms against
+  6.7 ms for the exact scan, and building 375 µs a vector; uniformly
+  random, recall is 0.57, as HNSWs are on data whose distances are all
+  alike. The build is the cost, most of it measuring distances, in
+  baseline x86-64 SIMD (no AVX); not measured with wider SIMD. Step 5,
+  saving the index, keeps opening from rebuilding it.
+- **A commit copies a search a reader is using** (`Arc::make_mut`), so
+  that the reader's stays as it was: a cost proportional to the index,
+  only while a search runs during a commit.
+- Tests: `hnsw::tests` (recall for each metric, searches as of ids,
+  rebuilding), `nearest_uses_the_vector_index_as_the_scan_would` (recall
+  against the scan, links not yet committed, deletes seen by readers and
+  `as of`, an overlay, rebuilding at `tick`, dropping), and a search after
+  reopening.
 
 ## Open questions
 
