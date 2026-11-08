@@ -1,0 +1,46 @@
+-- Vectors and nearest-neighbour search: documents with embeddings,
+-- searched near a vector and then filtered by their links.  The embeddings
+-- here have four dimensions; real ones have hundreds.
+
+insert /intro title "Getting started" ; writer /ann ; topic /basics ; text "[0.9, 0.1, 0.0, 0.1]" .
+       /queries title "Writing queries" ; writer /ann ; topic /basics ; text "[0.7, 0.6, 0.1, 0.0]" .
+       /paths title "Paths and rules" ; writer /bob ; topic /advanced ; text "[0.4, 0.8, 0.3, 0.1]" .
+       /tuning title "Tuning the planner" ; writer /bob ; topic /advanced ; text "[0.1, 0.3, 0.9, 0.2]" .
+       /storage title "How storage works" ; writer /cat ; topic /internals ; text "[0.0, 0.2, 0.8, 0.6]" .
+       /backup title "Backups and restores" ; writer /cat ; topic /internals ; text "[0.1, 0.0, 0.3, 0.9]"
+
+-- A vector is a value: vector() makes one from its text, str() writes it,
+-- and distance() measures between two, by cosine unless told otherwise.
+-- Stored by a `let` in an insert, each embedding is a value of its own.
+insert ?d embedding ?v where ?d text ?t . let ?v = vector(?t)
+select ?d, distance(?v, vector("[1, 0, 0, 0]")) as ?cosine,
+       distance(?v, vector("[1, 0, 0, 0]"), "l2") as ?l2 by ?cosine
+  where ?d embedding ?v
+
+-- An index on the predicate: its objects must be vectors of four
+-- dimensions, and searches use it.
+index vector on embedding dims 4 metric cosine
+\di
+
+-- nearest(P q k ?v ?d) binds the k values of P's links nearest q, and their
+-- distances; the rest of the pattern joins them.  The three documents
+-- nearest a question about writing queries:
+select ?title, ?d by ?d
+  where nearest(embedding "[0.6, 0.7, 0.2, 0.0]" 3 ?v ?d) .
+        ?doc embedding ?v ; title ?title
+
+-- Searched, then filtered by links: the nearest three, of which those Bob
+-- wrote, with their topics.
+select ?title, ?topic, ?d by ?d
+  where nearest(embedding "[0.6, 0.7, 0.2, 0.0]" 3 ?v ?d) .
+        ?doc embedding ?v ; title ?title ; writer /bob ; topic ?topic
+
+-- The vector can be a parameter, or bound by the pattern: here each
+-- document's nearest other.
+\set q "[0.0, 0.1, 0.7, 0.7]"
+select ?title by ?d where nearest(embedding $q 1 ?v ?d) . ?doc embedding ?v ; title ?title
+select ?a, ?b by ?a
+  where ?x embedding ?q ; title ?a .
+        nearest(embedding ?q 2 ?v ?d) . ?y embedding ?v ; title ?b . ?y != ?x
+
+\explain select ?title by ?d where nearest(embedding $q 1 ?v ?d) . ?doc embedding ?v ; title ?title

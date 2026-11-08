@@ -1,6 +1,6 @@
 # A vector index for nearest-neighbour search
 
-**Status:** open · **Size:** large · **Related:** [031](031-full-text-search.md) (another index over values), [009](closed/009-expressions-and-literal-types.md) (untyped values), [011](closed/011-adaptive-btree-index-entries.md) (index files that grow)
+**Status:** closed · **Size:** large · **Related:** [031](../031-full-text-search.md) (another index over values), [009](009-expressions-and-literal-types.md) (untyped values), [011](011-adaptive-btree-index-entries.md) (index files that grow)
 
 ## Motivation
 
@@ -43,7 +43,7 @@ distance, and a way to ask.
   the predicate; a rebuild drops them. HNSW handles this adequately
   until tombstones dominate, when `tick` rebuilds.
 - **Querying** is a call of a built-in relation, so it lowers to a
-  [`Step::Call`](../src/query/plan.rs) with given tuples computed at plan
+  [`Step::Call`](../../src/query/plan.rs) with given tuples computed at plan
   time, and joins like any relation: `nearest(embedding $q 10 ?v ?d)`
   binds the ten nearest values `?v` and their distances `?d`, and the
   rest of the pattern joins them: `select ?doc, ?d by ?d where
@@ -67,29 +67,31 @@ distance, and a way to ask.
 - [x] Saved and loaded like `stats`
 - [x] `index vector on P ...` and `delete index`, saved in the graph
 - [x] `nearest(P $q k ?v ?d)` as a built-in relation; `\explain` shows it
-      (exact, by a scan, for now)
-- [ ] A benchmark: 100 000 vectors of 384 dimensions, recall at 10
+      (by the index if there is one, else by a scan)
+- [x] A benchmark: 100 000 vectors of 384 dimensions, recall at 10
       against brute force, and queries per second
-- [ ] Example 23: documents with embeddings, searched and then filtered
+- [x] Example 23: documents with embeddings, searched and then filtered
       by their links
 
 ## Plan
 
-1. Vector values and functions (done).
-2. `nearest` as an exact scan (done) of a predicate's live links, so the query
+Each step is done.
+
+1. Vector values and functions.
+2. `nearest` as an exact scan of a predicate's live links, so the query
    surface, `as of` and readers are settled first, and the benchmark has
    brute force to measure recall against. It can't be a relation with
    tuples computed at plan time (`Step::Call`): `$q` and `as of` are
    known only when the query runs, so it is a step of its own, with the
    predicate, the query vector (a constant or parameter, at first) and
    `k` given.
-3. `index vector on P …` and `delete index` (done), saved in the graph
+3. `index vector on P …` and `delete index`, saved in the graph
    as rules are, and `\di`.
-4. (Done.) An HNSW of our own (a seeded RNG, so tests are deterministic), fed from
+4. An HNSW of our own (a seeded RNG, so tests are deterministic), fed from
    committed records only, so a rollback has nothing to undo; links not
    yet committed are a small list scanned exactly, cleared on rollback.
    Entries carry the ids that added and deleted them, for readers.
-5. (Done.) Saved as `{prefix}vector.<p>` beside the statistics, loaded and caught
+5. Saved (as `{prefix}vectors`, one file) beside the statistics, loaded and caught
    up from the log, or rebuilt.
 6. The benchmark, and example 23.
 
@@ -226,13 +228,70 @@ Step 5 is done:
   fed links committed after it was saved, as after a crash; built again
   from a file that isn't valid; the file removed with the last index).
 
-## Open questions
+Step 6 is done:
 
-- A dependency for the index (`hnsw_rs`, `usearch`) or a few hundred
-  lines of our own? The project has three runtime dependencies on
-  purpose; HNSW is small enough to own, and owning it makes the as-of
-  and tombstone behaviour straightforward.
-- Quantization (`f16`, `int8`) for memory: later, behind the same value
-  header byte.
-- Should the index also serve `?v (nearest $q 10)` as an object test, the
-  way `(~"re")` does? It reads well but hides a relation with two outputs.
+- **`benches/vectors.rs`:** `GRAQLITE_BENCH_VECTORS` vectors (default
+  100 000) of `GRAQLITE_BENCH_DIMS` (384), clustered as embeddings are
+  (each one of 1 000 centres moved a little), on disk with an index by
+  cosine. It prints the times to build, save and load the index and the
+  recall at 10 against an exact search of 100 queries, then times the
+  index's search, a prepared `nearest` query, and the same by l2, which
+  the index can't answer, so it scans.
+- **Measured** (release, one core, a quiet machine), 100 000 vectors of
+  384 dimensions:
+
+  | | |
+  | --- | --- |
+  | index built, at the commit | 89.8 s (898 µs a vector) |
+  | saved, with the graph dropped / loaded, when opened | 0.5 s / 0.3 s |
+  | recall at 10, `ef` 200 | 1.000 |
+  | the index's search | 0.68 ms (1 480 a second) |
+  | `nearest`, by the index | 0.70 ms (1 440 a second) |
+  | `nearest`, by the scan | 196 ms (5 a second) |
+
+  This data is easy for an HNSW: the clusters are far apart. Uniformly
+  random vectors of 384 dimensions, whose distances are all alike, have
+  a recall of about 0.57 (step 4); real embeddings lie between.
+- **`examples/23-vector-search.graql`:** documents with embeddings stored
+  by a `let`, distances, `index vector on`, `\di`, `nearest` filtered by
+  the documents' links, given a parameter and bound by the pattern, and
+  `\explain`.
+
+## As implemented
+
+As the design, but:
+
+- **Declarations are the graph's** (`Graph::create_vector_index`), not
+  GraQL's, so that the graph's searches read them, and `index` is a
+  keyword.
+- **The index is fed at commits,** not by `index_records` as entries are
+  appended: a rollback has nothing to undo, and a predicate the writer
+  has appended links of since its commit is searched exactly, by the
+  scan, until the next commit. Each item's live ranges are of the ids of
+  the links that made and ended them, so readers and `as of` searches
+  find what the scan would, since the search was built.
+- **The scan stays** as the answer wherever the index's might differ: a
+  subgraph, an overlay with the predicate's links, another metric, or
+  an `as of` before the search was built. Values that aren't vectors of
+  the query's dimension are skipped, by either.
+- **One file** (`{prefix}vectors`) for every search, saved when the graph
+  is dropped and at ticks once an eighth has changed.
+- **Not done:** the planner's other order (candidates first, then their
+  distances) for a pattern more selective than the search: with the
+  index, the search is about a millisecond, so no benchmark has needed
+  it yet. Searching as of before a search was built scans.
+
+## Open questions, answered
+
+- **A dependency or our own:** our own (`src/hnsw.rs`, about 600 lines
+  with tests): the as-of ranges and tombstones are its own.
+- **Quantization** (`f16`, `int8`): later, behind another header byte.
+  So is SIMD wider than baseline x86-64's: building measures distances
+  most of its time.
+- **`?v (nearest $q 10)` as an object test:** not done; `nearest(…)` binds
+  the distance too.
+
+## Closed
+
+Closed by the commits of steps 1 to 6, ending with the benchmark and
+example 23.

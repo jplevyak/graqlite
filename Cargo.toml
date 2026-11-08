@@ -37,6 +37,10 @@ harness = false
 name = "graql"
 harness = false
 
+[[bench]]
+name = "vectors"
+harness = false
+
 [features]
 default = ["cli"]
 # The `graqlite` command line shell.

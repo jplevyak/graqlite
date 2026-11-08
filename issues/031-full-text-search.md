@@ -1,6 +1,6 @@
 # A full-text index over values
 
-**Status:** open · **Size:** medium · **Related:** [030](030-vector-index.md), [011](closed/011-adaptive-btree-index-entries.md) (postings: the inverted index's data structure, already built), [026](026-index-lookup-allocations.md)
+**Status:** open · **Size:** medium · **Related:** [030](closed/030-vector-index.md), [011](closed/011-adaptive-btree-index-entries.md) (postings: the inverted index's data structure, already built), [026](026-index-lookup-allocations.md)
 
 ## Motivation
 

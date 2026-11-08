@@ -1,0 +1,46 @@
+INSERT 24
+INSERT 6
+ d        | cosine   | l2
+----------+----------+----------
+ /intro   | 0.012122 | 0.173205
+ /queries | 0.245171 | 0.678233
+ /paths   | 0.578363 | 1.048809
+ /backup  | 0.895172 | 1.30767
+ /tuning  | 0.897402 | 1.322876
+ /storage | 1        | 1.428286
+(6 rows)
+INDEX vector on embedding
+ predicate | dims | metric | m  | ef
+-----------+------+--------+----+-----
+ embedding | 4    | cosine | 16 | 200
+(1 row)
+ title             | d
+-------------------+----------
+ "Writing queries" | 0.016998
+ "Paths and rules" | 0.039091
+ "Getting started" | 0.290266
+(3 rows)
+ title             | topic     | d
+-------------------+-----------+----------
+ "Paths and rules" | /advanced | 0.039091
+(1 row)
+ title
+---------------------
+ "How storage works"
+(1 row)
+ a                      | b
+------------------------+----------------------
+ "Backups and restores" | "How storage works"
+ "Getting started"      | "Writing queries"
+ "How storage works"    | "Tuning the planner"
+ "Paths and rules"      | "Writing queries"
+ "Tuning the planner"   | "How storage works"
+ "Writing queries"      | "Paths and rules"
+(6 rows)
+reduce: ?v 6, ?doc 6, ?title 6 candidates, 12 index entries read
+scan nearest(embedding "[0.0, 0.1, 0.7, 0.7]" 1 ?v ?d cosine), rows ~1
+  via the vector index of 6 vectors, or:
+    scan (?nearest subject 2 embedding ?v) via predicate index, rows ~6
+bind join (?doc embedding ?v) via 6 reduced links, rows ~1
+bind join (?doc title ?title) via 6 reduced links, rows ~1
+order by data(?d)
