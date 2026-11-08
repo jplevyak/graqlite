@@ -2653,6 +2653,146 @@ fn vectors_are_stored_encoded_and_measured() {
     assert_eq!(texts(&g, &out[0]), vec![vec![""]]);
 }
 
+/// A session with four documents' embeddings, by two writers.
+fn embedded() -> (Graph, Session) {
+    let mut g = graph();
+    let mut s = Session::new();
+    s.execute(
+        &mut g,
+        "insert /a text \"[1, 0]\" ; writer /ann . /b text \"[0.6, 0.8]\" ; writer /bob .
+                /c text \"[0, 1]\" ; writer /ann . /d text \"[0.9, 0.1]\" ; writer /ann",
+    )
+    .unwrap();
+    s.execute(
+        &mut g,
+        "insert ?x embedding ?v where ?x text ?t . let ?v = vector(?t)",
+    )
+    .unwrap();
+    (g, s)
+}
+
+#[test]
+fn nearest_finds_the_k_nearest_values() {
+    let (mut g, mut s) = embedded();
+    let near = |g: &mut Graph, s: &mut Session, text: &str| -> Vec<Vec<String>> {
+        let out = s.execute(g, text).unwrap();
+        texts(g, &out[0])
+    };
+    let q = "select ?x, ?d by ?d where nearest(embedding \"[1, 0.05]\" 3 ?v ?d) . ?x embedding ?v";
+    assert_eq!(
+        near(&mut g, &mut s, q),
+        vec![
+            vec!["/a", "0.001248"],
+            vec!["/d", "0.001842"],
+            vec!["/b", "0.360798"]
+        ]
+    );
+    // Given as a parameter, prepared, and run with others.
+    let statement =
+        &parse("select ?x by ?x where nearest(embedding $q 1 ?v ?d) . ?x embedding ?v").unwrap()[0];
+    let mut prepared = s.prepare(&g, statement).unwrap();
+    for (q, x) in [("[0, 1]", "/c"), ("0.7 0.7", "/b"), ("[1, 0]", "/a")] {
+        let params = Params::from([("q".into(), Param::Value(q.into()))]);
+        let out = s.run_prepared(&mut g, &mut prepared, &params).unwrap();
+        assert_eq!(texts(&g, &out), vec![vec![x]], "{q}");
+    }
+    // A vector bound by the pattern: each document's nearest other.
+    let out = near(
+        &mut g,
+        &mut s,
+        "select ?x, ?y by ?x where ?x embedding ?q . nearest(embedding ?q 2 ?v ?d) . \
+         ?y embedding ?v . ?y != ?x",
+    );
+    assert_eq!(
+        out,
+        vec![
+            vec!["/a", "/d"],
+            vec!["/b", "/c"],
+            vec!["/c", "/b"],
+            vec!["/d", "/a"]
+        ]
+    );
+    // A value bound already is kept if it is among the nearest.
+    let out = near(
+        &mut g,
+        &mut s,
+        "select ?x by ?x where ?x writer /ann ; embedding ?v . nearest(embedding \"[0, 1]\" 2 ?v ?d)",
+    );
+    assert_eq!(out, vec![vec!["/c"]]);
+    // Within a graph over the database: its links are searched too.
+    s.execute(
+        &mut g,
+        "SET extra = database:{ /e embedding \"[0.1, 0.9]\" }",
+    )
+    .unwrap();
+    // A value given as text isn't a vector until made one: none is found
+    // for /e, whose value is text.
+    let out = near(
+        &mut g,
+        &mut s,
+        "select ?x from graph extra where nearest(embedding \"[0, 1]\" 1 ?v ?d) . ?x embedding ?v",
+    );
+    assert_eq!(out, vec![vec!["/c"]]);
+    // Nothing computed is left held: only the graph's link, key and value.
+    drop(prepared);
+    assert_eq!(g.ephemeral_count(), 3);
+    // Mistakes.
+    for (text, message) in [
+        (
+            "nearest(embedding \"[1, 0]\" 0 ?v ?d)",
+            "k must be a number above 0",
+        ),
+        (
+            "nearest(?p \"[1, 0]\" 1 ?v ?d) . ?x ?p ?y",
+            "predicate must be a constant",
+        ),
+        (
+            "nearest(embedding \"[1, 0]\" 1 ?v ?d manhattan)",
+            "metric must be",
+        ),
+        ("nearest(embedding \"[1, 0]\" 1 ?v)", "nearest takes"),
+        (
+            "nearest(embedding \"[1, 0]\" 1 3 ?d)",
+            "value must be a variable",
+        ),
+    ] {
+        let e = s
+            .execute(&mut g, &format!("select ?v where {text}"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(message), "{text}: {e}");
+    }
+}
+
+#[test]
+fn nearest_searches_a_reader_as_of_its_commit() {
+    let (mut g, mut s) = embedded();
+    g.commit().unwrap();
+    let r = g.reader();
+    s.execute(&mut g, "insert /e text \"[0.01, 1]\"").unwrap();
+    s.execute(
+        &mut g,
+        "insert /e embedding ?v where /e text ?t . let ?v = vector(?t)",
+    )
+    .unwrap();
+    s.execute(&mut g, "delete /c embedding ?v where /c embedding ?v")
+        .unwrap();
+    let q = "select ?x where nearest(embedding \"[0, 1]\" 1 ?v ?d) . ?x embedding ?v";
+    // The writer sees the new value, and not the deleted one.
+    let out = s.execute(&mut g, q).unwrap();
+    assert_eq!(texts(&g, &out[0]), vec![vec!["/e"]]);
+    // The reader, as of its commit, the old.
+    let out = Session::new().read(&r, &parse(q).unwrap()[0]).unwrap();
+    assert_eq!(texts(&r, &out), vec![vec!["/c"]]);
+    let out = Session::new()
+        .read(
+            &r,
+            &parse("select ?d where nearest(embedding \"[0, 1]\" 1 ?v ?d)").unwrap()[0],
+        )
+        .unwrap();
+    assert_eq!(texts(&r, &out), vec![vec!["0"]]);
+}
+
 #[test]
 fn queries_free_the_ephemeral_values_they_compute() {
     let mut g = graph();

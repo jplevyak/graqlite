@@ -65,7 +65,8 @@ distance, and a way to ask.
 - [ ] An HNSW over values in memory, fed by `index_records`, with
       tombstones, saved and loaded like `stats`
 - [ ] `index vector on P ...` and `delete index`, saved in the graph
-- [ ] `nearest(P $q k ?v ?d)` as a built-in relation; `\explain` shows it
+- [x] `nearest(P $q k ?v ?d)` as a built-in relation; `\explain` shows it
+      (exact, by a scan, for now)
 - [ ] A benchmark: 100 000 vectors of 384 dimensions, recall at 10
       against brute force, and queries per second
 - [ ] Example 23: documents with embeddings, searched and then filtered
@@ -74,7 +75,7 @@ distance, and a way to ask.
 ## Plan
 
 1. Vector values and functions (done).
-2. `nearest` as an exact scan of a predicate's live links, so the query
+2. `nearest` as an exact scan (done) of a predicate's live links, so the query
    surface, `as of` and readers are settled first, and the benchmark has
    brute force to measure recall against. It can't be a relation with
    tuples computed at plan time (`Step::Call`): `$q` and `as of` are
@@ -111,6 +112,33 @@ Step 1 is done:
   vector(?t)`. Without it GraQL had no way to store a vector.
 - Tests: `vector::tests`, `vectors_are_stored_encoded_and_measured`, and
   `tests/cli/vectors.graql`.
+
+Step 2 is done:
+
+- **`query::Nearest`**, added by `Group::nearest(search, subject)`: the
+  predicate, the query vector (a constant, a parameter, or a variable
+  bound earlier), `k`, the metric, and the variables of the value and
+  distance. Its scan, `?subject P ?value`, is a group of its own, planned
+  alone (`Step::Nearest`), so it sees `as of`, subgraphs, overlays and a
+  reader's snapshot as any pattern does, and runs once per execution.
+  `NearestLookup` decodes the vectors once, then, for each row, keeps the
+  `k` nearest (ties by id) and binds each distance as an ephemeral value
+  held by the query.
+- **Planning:** an item like a call, ready once its vector is bound; it
+  costs the scan plus a distance per vector per row. The planner can run
+  it first, binding values that later patterns join, or after them, as a
+  filter of values bound already. Either way, it is the `k` nearest of
+  all, then joined.
+- **GraQL:** `nearest(P q k ?v ?d [metric])` in a pattern, unless a rule
+  has that name; its mistakes are reported by name. `\explain` shows the
+  search and its scan.
+- Standing queries refuse it: the nearest values aren't maintained
+  incrementally.
+- Tests: `nearest_matches_a_brute_force_search` (300 random vectors, each
+  metric), `nearest_sees_overlays_and_history`,
+  `nearest_finds_the_k_nearest_values`,
+  `nearest_searches_a_reader_as_of_its_commit`, and
+  `tests/cli/nearest.graql`.
 
 ## Open questions
 

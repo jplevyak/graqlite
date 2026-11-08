@@ -18,8 +18,8 @@ use super::reduce::{Link, live_links};
 use super::result::{Derivation, ResultGraph, ResultLink, ResultNode};
 use super::rules::{self, Relations, Tuples};
 use super::{
-    Assertion, Filter, LinkAggregate, Overlay, PathExpr, PathPattern, Pattern, Relation, SortKey,
-    TemplateNode, Term, Var, paths,
+    Assertion, Filter, LinkAggregate, Nearest, Overlay, PathExpr, PathPattern, Pattern, Relation,
+    SortKey, TemplateNode, Term, Var, paths,
 };
 use crate::graph::{EPHEMERAL, Error, Graph, Result};
 use crate::local_table::{IdSet, Ids};
@@ -475,6 +475,65 @@ impl Lookup for CallLookup {
                 .iter()
                 .copied()
                 .zip(self.tuples[i].iter().copied());
+            if extend_row(&self.bound, row, fields, &mut new) {
+                out.push(&new);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Finds the values nearest a vector, given a row: the `k` nearest of the
+/// vectors its scan finds, which it finds once.
+struct NearestLookup {
+    nearest: Nearest,
+    scan: GroupPlan,
+    ctx: Context,
+    bound: Vec<bool>,
+    /// The values the scan found that are vectors, by id, once found.
+    vectors: Option<Vec<(u64, Vec<f32>)>>,
+}
+
+impl Lookup for NearestLookup {
+    fn matches(&mut self, g: &Graph, row: &[u64], out: &mut Batch) -> Result<()> {
+        let n = &self.nearest;
+        let query = match n.query {
+            Term::Id(id) => id,
+            Term::Var(v) => row[v.0],
+        };
+        let Some(query) = Cell::of_id(query).vector(g) else {
+            return Ok(());
+        };
+        if self.vectors.is_none() {
+            let unbound = self.ctx.unbound();
+            let values = matched(&self.ctx, g, &self.scan, &[n.value], &unbound, None)?;
+            let mut vectors: Vec<(u64, Vec<f32>)> = values
+                .into_iter()
+                .filter_map(|v| Some((v[0], crate::vector::decode(&g.data(v[0])?)?)))
+                .collect();
+            vectors.sort_unstable_by_key(|v| v.0);
+            self.vectors = Some(vectors);
+        }
+        let vectors = self.vectors.as_ref().expect("found");
+        let mut found: Vec<(f64, u64)> = vectors
+            .iter()
+            .filter_map(|(id, v)| Some((crate::vector::distance(&query, v, n.metric)?, *id)))
+            .collect();
+        // Nearest first; of those as near, the earlier.
+        let order = |a: &(f64, u64), b: &(f64, u64)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+        if found.len() > n.k {
+            found.select_nth_unstable_by(n.k, order);
+            found.truncate(n.k);
+        }
+        found.sort_unstable_by(order);
+        let mut new = Vec::new();
+        for (d, id) in found {
+            let d = Cell::Float(d).data(g).expect("a number");
+            let d = match &self.ctx.hold {
+                Some(h) => h.value(g, &d),
+                None => g.ephemeral_value(&d),
+            };
+            let fields = [(Term::Var(n.value), id), (Term::Var(n.distance), d)];
             if extend_row(&self.bound, row, fields, &mut new) {
                 out.push(&new);
             }
@@ -1548,6 +1607,8 @@ struct Context {
     values: Values,
     /// The overlay read over the database, if any.
     overlay: Option<Shared>,
+    /// The hold of the ephemeral ids the query gives, if any.
+    hold: Option<crate::graph::EphemeralHold>,
 }
 
 /// The values of the parameters given values that are not entries, by slot;
@@ -1741,6 +1802,25 @@ impl Context {
                         streaming: false,
                     });
                     call.vars().for_each(|v| bound[v.0] = true);
+                    joined
+                }
+                Step::Nearest { nearest, scan, .. } => {
+                    let joined = Box::new(BindJoin {
+                        input: op,
+                        matcher: Box::new(NearestLookup {
+                            nearest: nearest.clone(),
+                            scan: scan.clone(),
+                            ctx: self.clone(),
+                            bound: bound.to_vec(),
+                            vectors: None,
+                        }),
+                        in_batch: Batch::new(width),
+                        in_pos: 0,
+                        pending: Batch::new(width),
+                        pending_pos: 0,
+                        streaming: false,
+                    });
+                    nearest.vars().for_each(|v| bound[v.0] = true);
                     joined
                 }
                 Step::Filter(filters) => Box::new(FilterOp {
@@ -2054,6 +2134,7 @@ impl Plan {
             start: start.clone(),
             params: self.params.clone(),
             values: values.clone(),
+            hold: q.ephemeral_hold().cloned(),
         };
         let op = ctx.build(&self.root, ctx.unit(), &mut ctx.unbound());
         Ok(Matched {

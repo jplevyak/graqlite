@@ -187,6 +187,14 @@
 //!   smaller: `insert ?d embedding ?v where ?d text ?t . let ?v =
 //!   vector(?t)` stores some, and `?d embedding ?v . distance(?v,
 //!   vector($q)) < 0.2` finds those near another.
+//! - `nearest(P q k ?v ?d [metric])` binds `?v` to each of the `k` values
+//!   of `P`'s live links nearest the vector `q` (a constant, `$param`, or a
+//!   variable the pattern binds), and `?d` to its distance, by cosine (or
+//!   `l2`, `dot`); the rest of the pattern joins them: `select ?doc, ?d by
+//!   ?d where nearest(embedding $q 10 ?v ?d) . ?doc embedding ?v ; writer
+//!   /ann` (see [`query::Nearest`](crate::query::Nearest)).  It is the `k`
+//!   nearest of all, then joined: fewer, if the rest of the pattern keeps
+//!   fewer.  The search is exact, a scan of the links.
 //! - `<< s p o >>` is a link node: the live link `s p o`, as a node, to
 //!   make statements about links (`<< /a knows /b >> since 2019`).  Unlike
 //!   an RDF-star quoted triple, the link must be there.  `<< :?l s p o >>`
@@ -3070,6 +3078,55 @@ struct Lowering<'g> {
 }
 
 impl Lowering<'_> {
+    /// Adds `nearest(P q k ?v ?d [metric])` to `group`: the `k` values of
+    /// `P`'s links nearest the vector `q` (a constant, parameter or
+    /// variable), as `?v`, and their distances, as `?d`.
+    fn nearest(&mut self, group: &mut Group, args: &[Node]) -> Result<()> {
+        let invalid = |what: &str| Error::Invalid(format!("nearest's {what}"));
+        let (p, q, k, v, d, metric) = match args {
+            [p, q, k, v, d] => (p, q, k, v, d, None),
+            [p, q, k, v, d, m] => (p, q, k, v, d, Some(m)),
+            _ => {
+                return Err(Error::Invalid(
+                    "nearest takes a predicate, a vector, k, a value's variable, a \
+                     distance's and, if not cosine, a metric"
+                        .into(),
+                ));
+            }
+        };
+        let Term::Id(predicate) = self.term(p) else {
+            return Err(invalid("predicate must be a constant"));
+        };
+        let query = match q {
+            Node::Blank(_) => return Err(invalid("vector can't be a blank node")),
+            q => self.term(q),
+        };
+        let k = match k {
+            Node::Value(k) => k.parse::<usize>().ok().filter(|&k| k > 0),
+            _ => None,
+        }
+        .ok_or_else(|| invalid("k must be a number above 0"))?;
+        let mut var = |n: &Node, what: &str| match n {
+            Node::Var(name) | Node::Blank(name) => Ok(self.var(name)),
+            _ => Err(invalid(&format!("{what} must be a variable"))),
+        };
+        let (value, distance) = (var(v, "value")?, var(d, "distance")?);
+        let metric = match metric {
+            None => crate::vector::Metric::Cosine,
+            Some(Node::Value(m) | Node::Symbol(m)) => crate::vector::Metric::of_name(m)
+                .ok_or_else(|| invalid("metric must be cosine, l2 or dot"))?,
+            Some(_) => return Err(invalid("metric must be cosine, l2 or dot")),
+        };
+        let mut search =
+            crate::query::Nearest::new(predicate, query, k, value, distance).metric(metric);
+        search.as_of = self.as_of;
+        let subject = self
+            .query
+            .var(&format!("nearest subject {}", self.vars.len()));
+        group.nearest(search, subject);
+        Ok(())
+    }
+
     /// The hold of the query's ephemeral ids.
     fn hold(&self) -> &EphemeralHold {
         self.query.ephemeral_hold().expect("a hold")
@@ -3526,6 +3583,12 @@ impl Lowering<'_> {
                 let result = self.add(group, p);
                 self.as_of = outer;
                 result?;
+            }
+            // The built-in search, unless a rule has its name.
+            Pattern::Call(name, args)
+                if name.eq_ignore_ascii_case("nearest") && !self.relations.contains_key(name) =>
+            {
+                self.nearest(group, args)?;
             }
             Pattern::Call(_, _) if self.as_of.is_some() => {
                 return Err(Error::Invalid(

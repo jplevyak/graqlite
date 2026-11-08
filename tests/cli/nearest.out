@@ -1,0 +1,45 @@
+INSERT 8
+INSERT 1
+INSERT 1
+INSERT 1
+INSERT 1
+ v          | d
+------------+----------
+ [1, 0]     | 0.001248
+ [0.9, 0.1] | 0.001842
+(2 rows)
+ doc | d
+-----+----------
+ /a  | 0.001248
+ /d  | 0.001842
+(2 rows)
+reduce: ?v 3, ?doc 3 candidates, 7 index entries read
+scan nearest(embedding "[1, 0.05]" 3 ?v ?d cosine), rows ~3
+  searching, once:
+    scan (?nearest subject 2 embedding ?v) via predicate index, rows ~4
+bind join (?doc embedding ?v) via 3 reduced links, rows ~3
+bind join (?doc writer /ann) via 3 reduced links, rows ~3
+order by data(?d)
+ doc | d
+-----+----------
+ /c  | 0
+ /b  | 0.632456
+(2 rows)
+ v
+---
+(0 rows)
+ v
+---
+(0 rows)
+RULE near
+ x
+----
+ /c
+(1 row)
+DELETE 1
+ x  | d
+----+----------
+ /d | 0.006116
+(1 row)
+tests/cli/nearest.graql:23: error: nearest's k must be a number above 0
+[exit 1]

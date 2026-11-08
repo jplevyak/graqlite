@@ -453,6 +453,62 @@ impl PathPattern {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Relation(usize);
 
+/// A search for the `k` values nearest a vector, of the objects of the live
+/// links with a predicate (see [`Group::nearest`]): the rows it extends
+/// bind each to `value`, nearest first, and its distance to `distance`, an
+/// [ephemeral value](Graph::ephemeral_value) if the graph hasn't it.  Each
+/// is searched for exactly, by scanning the links; values that aren't
+/// vectors of the query's dimension are skipped.
+#[derive(Debug, Clone)]
+pub struct Nearest {
+    pub predicate: u64,
+    /// The vector searched near: a value holding one, or its text.
+    pub query: Term,
+    pub k: usize,
+    pub metric: crate::vector::Metric,
+    pub value: Var,
+    pub distance: Var,
+    /// The id as of which the links are searched, overriding the query's.
+    pub as_of: Option<u64>,
+    /// The links searched, `?subject predicate ?value`: a group of its own,
+    /// planned alone, so that it is searched once per run.
+    pub(crate) scan: Group,
+}
+
+impl Nearest {
+    /// A search for the `k` values of `predicate`'s links nearest `query`, by
+    /// cosine distance.
+    pub fn new(
+        predicate: u64,
+        query: impl Into<Term>,
+        k: usize,
+        value: Var,
+        distance: Var,
+    ) -> Self {
+        Nearest {
+            predicate,
+            query: query.into(),
+            k,
+            metric: crate::vector::Metric::Cosine,
+            value,
+            distance,
+            as_of: None,
+            scan: Group::new(),
+        }
+    }
+
+    /// The same, by `metric`.
+    pub fn metric(mut self, metric: crate::vector::Metric) -> Self {
+        self.metric = metric;
+        self
+    }
+
+    /// The variables it binds.
+    fn vars(&self) -> impl Iterator<Item = Var> + '_ {
+        [self.value, self.distance].into_iter()
+    }
+}
+
 /// A pattern matching the tuples of a relation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Call {
@@ -588,6 +644,7 @@ pub struct Group {
     patterns: Vec<Pattern>,
     paths: Vec<PathPattern>,
     calls: Vec<Call>,
+    nearest: Vec<Nearest>,
     unions: Vec<Vec<Group>>,
     nots: Vec<Group>,
     /// Joined after the rest of the group, keeping rows they don't match.
@@ -646,6 +703,9 @@ impl Group {
             for p in g.patterns.iter_mut().filter(|p| p.graph.is_none()) {
                 p.graph = Some(t);
             }
+            for n in &mut g.nearest {
+                set(&mut n.scan, t);
+            }
             for inner in g
                 .unions
                 .iter_mut()
@@ -689,6 +749,24 @@ impl Group {
         if let Some(p) = self.paths.last_mut() {
             p.as_of = Some(id);
         }
+        self
+    }
+
+    /// Adds a search for the values nearest a vector (see [`Nearest`]):
+    /// `subject` is a variable of its own for the subjects of the links
+    /// searched, which the rows don't bind.  The vector must be a constant
+    /// or a parameter, or bound by the rest of the group.
+    pub fn nearest(&mut self, mut search: Nearest, subject: Var) -> &mut Self {
+        let mut scan = Group {
+            graph: self.graph,
+            ..Group::default()
+        };
+        scan.pattern(subject, search.predicate, search.value);
+        if let Some(id) = search.as_of {
+            scan.at(id);
+        }
+        search.scan = scan;
+        self.nearest.push(search);
         self
     }
 
@@ -815,11 +893,17 @@ impl Group {
             || self.groups().any(Group::has_paths_or_calls)
     }
 
+    /// Whether the group, or one in it, searches for nearest values.
+    pub(crate) fn has_nearest(&self) -> bool {
+        !self.nearest.is_empty() || self.groups().any(Group::has_nearest)
+    }
+
     /// The variables every row of the group binds.
     fn bound_vars(&self) -> BTreeSet<Var> {
         let mut vars: BTreeSet<Var> = self.patterns.iter().flat_map(Pattern::vars).collect();
         vars.extend(self.paths.iter().flat_map(PathPattern::vars));
         vars.extend(self.calls.iter().flat_map(Call::vars));
+        vars.extend(self.nearest.iter().flat_map(Nearest::vars));
         // Every branch binds the same variables, but for the hidden link
         // variables of a query recording its links, which differ.
         for b in self.unions.iter().flatten() {
@@ -850,6 +934,7 @@ impl Group {
     /// Every variable the group uses.
     fn all_vars(&self) -> BTreeSet<Var> {
         let mut vars = self.bound_vars();
+        vars.extend(self.nearest.iter().filter_map(|n| n.query.var()));
         vars.extend(self.filters.iter().flat_map(Filter::vars));
         for g in self.groups() {
             vars.extend(g.all_vars());
@@ -864,9 +949,20 @@ impl Group {
         if self.patterns.is_empty()
             && self.paths.is_empty()
             && self.calls.is_empty()
+            && self.nearest.is_empty()
             && self.unions.is_empty()
         {
             return Err(Error::InvalidArgument("a group needs a pattern or a union"));
+        }
+        for n in &self.nearest {
+            if n.k == 0 {
+                return Err(Error::InvalidArgument("a nearest search needs k > 0"));
+            }
+            if n.value == n.distance {
+                return Err(Error::InvalidArgument(
+                    "a nearest search binds its value and distance to different variables",
+                ));
+            }
         }
         for p in &self.paths {
             if let Some(e) = &p.expr {
@@ -1735,6 +1831,18 @@ impl Query {
             Some(id) => format!("{spo} as of {id}"),
             None => spo,
         }
+    }
+
+    fn nearest_name(&self, n: &Nearest, name: Namer<'_>) -> String {
+        format!(
+            "nearest({} {} {} {} {} {})",
+            name(n.predicate),
+            self.term_name(n.query, name),
+            n.k,
+            self.var_name(n.value),
+            self.var_name(n.distance),
+            n.metric.name()
+        )
     }
 
     fn call_name(&self, c: &Call, name: Namer<'_>) -> String {

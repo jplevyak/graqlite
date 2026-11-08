@@ -215,6 +215,10 @@ batches.
   `q.rule_asserts`), with new nodes for blank nodes, and by aggregates
   (`q.link_aggregate(LinkAggregate::new(LinkFunction::Rank, s, p, key))`),
   whose links the rest of the query can match.
+- **Nearest neighbours:** `group.nearest(Nearest::new(p, q, k, v, d), s)`
+  binds `v` to the `k` values of `p`'s links nearest the vector `q`, and
+  `d` to their distances (cosine, l2 or dot), searched exactly; the rest
+  of the query joins them.  Vectors are values (`graqlite::vector`).
 - **Overlays** (`Overlay`): links held in memory, over the database or
   alone, live or deleting a stored fact, layered (`over`), made from a
   result graph (`Overlay::of_graph`) and written (`insert_into`).  Any plan
@@ -278,7 +282,9 @@ have any predicate.)
   100`, with string, number, time and vector functions: `vector("[0.1,
   0.2]")`, `distance(?a, ?b, "cosine")`), link nodes (`<< /a knows /b
   >> since 2019`), transitive predicates (`p++`), path expressions (`?x (knows+
-  / ^parent | guardian{1,3}) ?y`, with keys as steps), and calls of rules.
+  / ^parent | guardian{1,3}) ?y`, with keys as steps), calls of rules, and
+  nearest-neighbour search (`nearest(embedding $q 10 ?v ?d) . ?doc
+  embedding ?v`).
 - **The tour's shorter forms:** a predicate without an object (`?s type`), a
   subject alone (`lookup ?subjects`), `lookup P where Q`, `<<` / `>>` to
   reverse and chain predicates and `!p` to reverse one, `+` after objects,

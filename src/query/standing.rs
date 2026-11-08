@@ -118,6 +118,11 @@ impl StandingQuery {
                 "a standing query can not have paths or calls",
             ));
         }
+        if query.root.has_nearest() || query.rules.iter().any(|r| r.body.has_nearest()) {
+            return Err(Error::InvalidArgument(
+                "a standing query can not search for nearest values",
+            ));
+        }
         if !query.link_aggregates.is_empty() {
             return Err(Error::InvalidArgument(
                 "a standing query can not have aggregates deriving links",

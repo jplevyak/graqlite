@@ -4046,3 +4046,114 @@ fn maintained_subgraphs_settle() {
         .is_err()
     );
 }
+
+#[test]
+fn nearest_matches_a_brute_force_search() {
+    use crate::vector::{self, Metric};
+    let mut g = graph();
+    let mut rng = Rng(7);
+    let p = g.value(b"embedding").unwrap();
+    let mut random = |n: usize| -> Vec<f32> {
+        (0..n)
+            .map(|_| (rng.below(2001) as f32 - 1000.0) / 1000.0)
+            .collect()
+    };
+    let mut vectors = Vec::new();
+    for _ in 0..300 {
+        let s = g.node().unwrap();
+        let v = random(8);
+        let id = g.value(&vector::encode(&v)).unwrap();
+        g.link(s, p, id).unwrap();
+        vectors.push((id, v));
+    }
+    // A value of another dimension, and one that isn't a vector, are skipped.
+    let s = g.node().unwrap();
+    let other = g.value(&vector::encode(&[1.0, 2.0])).unwrap();
+    g.link(s, p, other).unwrap();
+    let text = g.value(b"[1, 2, 3, 4, 5, 6, 7, 8]").unwrap();
+    g.link(s, p, text).unwrap();
+    g.commit().unwrap();
+    for (metric, k) in [(Metric::Cosine, 10), (Metric::L2, 1), (Metric::Dot, 25)] {
+        let query = random(8);
+        let mut want: Vec<(f64, u64)> = vectors
+            .iter()
+            .map(|(id, v)| (vector::distance(&query, v, metric).unwrap(), *id))
+            .collect();
+        want.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        want.truncate(k);
+        let mut q = Query::new();
+        let (v, d, s) = (q.var("v"), q.var("d"), q.var("s"));
+        let qv = q.param("q");
+        q.group()
+            .nearest(Nearest::new(p, qv, k, v, d).metric(metric), s);
+        q.select([v, d]);
+        let rows = q
+            .plan(&g)
+            .unwrap()
+            .execute_values(&g, &[aggregate::Cell::Text(vector::format(&query))])
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let got: Vec<u64> = rows.iter().map(|r| r[0]).collect();
+        assert_eq!(
+            got,
+            want.iter().map(|w| w.1).collect::<Vec<_>>(),
+            "{metric:?}"
+        );
+        // Distances read back, to the precision a computed value has.
+        for (row, w) in rows.iter().zip(&want) {
+            let d: f64 = std::str::from_utf8(&g.data(row[1]).unwrap())
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((d - w.0).abs() < 1e-6, "{d} {}", w.0);
+        }
+    }
+}
+
+#[test]
+fn nearest_sees_overlays_and_history() {
+    use crate::vector;
+    let mut g = graph();
+    let p = g.value(b"embedding").unwrap();
+    let (a, b) = (g.node().unwrap(), g.node().unwrap());
+    let va = g.value(&vector::encode(&[1.0, 0.0])).unwrap();
+    g.link(a, p, va).unwrap();
+    g.commit().unwrap();
+    let before = g.next_id();
+    let vb = g.value(&vector::encode(&[0.0, 1.0])).unwrap();
+    g.link(b, p, vb).unwrap();
+    g.commit().unwrap();
+    let nearest = |as_of: Option<u64>| {
+        let mut q = Query::new();
+        let (v, d, s) = (q.var("v"), q.var("d"), q.var("s"));
+        let query = g.ephemeral_value(&vector::encode(&[0.1, 1.0]));
+        let mut n = Nearest::new(p, query, 1, v, d);
+        n.as_of = as_of;
+        q.group().nearest(n, s);
+        q.select([v]);
+        q
+    };
+    assert_eq!(nearest(None).run(&g).unwrap(), vec![vec![vb]]);
+    // As of before /b's link.
+    assert_eq!(nearest(Some(before)).run(&g).unwrap(), vec![vec![va]]);
+    let mut q = nearest(None);
+    q.as_of(before);
+    assert_eq!(q.run(&g).unwrap(), vec![vec![va]]);
+    // Over an overlay with a vector of its own, and one deleting /b's link.
+    let mut ov = Overlay::new();
+    let c = g.ephemeral_node();
+    let vc = ov
+        .ephemeral_hold(&g)
+        .value(&g, &vector::encode(&[0.1, 1.0]));
+    ov.insert(&g, [c, p, vc]);
+    let ov = Arc::new(ov);
+    assert_eq!(nearest(None).run_over(&g, &ov).unwrap(), vec![vec![vc]]);
+    let mut del = Overlay::new();
+    del.delete(&g, [b, p, vb]);
+    assert_eq!(
+        nearest(None).run_over(&g, &Arc::new(del)).unwrap(),
+        vec![vec![va]]
+    );
+    // A standing query can't search.
+    assert!(StandingQuery::new(&nearest(None), &g).is_err());
+}

@@ -1,0 +1,23 @@
+-- nearest(P q k ?v ?d [metric]) binds the k values of P's links nearest
+-- the vector q, and their distances, searched exactly; the rest of the
+-- pattern joins them.
+insert /a name "a" ; writer /ann . /b name "b" ; writer /bob . /c name "c" ; writer /ann . /d name "d" ; writer /ann
+insert ?x embedding ?v where ?x name "a" . let ?v = vector("[1, 0]")
+insert ?x embedding ?v where ?x name "b" . let ?v = vector("[0.6, 0.8]")
+insert ?x embedding ?v where ?x name "c" . let ?v = vector("[0, 1]")
+insert ?x embedding ?v where ?x name "d" . let ?v = vector("[0.9, 0.1]")
+select ?v, ?d by ?d where nearest(embedding "[1, 0.05]" 2 ?v ?d)
+-- The nearest three, then those by /ann: /b is among them, but not hers.
+select ?doc, ?d by ?d where nearest(embedding "[1, 0.05]" 3 ?v ?d) . ?doc embedding ?v ; writer /ann
+\explain select ?doc, ?d by ?d where nearest(embedding "[1, 0.05]" 3 ?v ?d) . ?doc embedding ?v ; writer /ann
+-- By another metric; a vector of another dimension, or none, finds nothing.
+select ?doc, ?d by ?d where nearest(embedding "[0, 1]" 2 ?v ?d l2) . ?doc embedding ?v
+select ?v where nearest(embedding "[1, 0, 0]" 1 ?v ?d)
+select ?v where nearest(embedding "not a vector" 1 ?v ?d)
+-- In a rule's body; and a deleted link's value isn't found.
+rule near(?x) nearest(embedding "[0, 1]" 1 ?v ?d) . ?x embedding ?v
+select ?x where near(?x)
+delete /a embedding ?v where /a embedding ?v
+select ?x, ?d where nearest(embedding "[1, 0]" 1 ?v ?d) . ?x embedding ?v
+-- A mistake, which ends the script.
+select ?v where nearest(embedding "[1, 0]" 0 ?v ?d)

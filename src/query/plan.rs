@@ -9,7 +9,9 @@ use super::exec::Rows;
 use super::reduce::{self, Link, Reduced, Reduction};
 use super::result::ResultGraph;
 use super::rules::{self, Relations, Tuples};
-use super::{Call, Filter, Group, Namer, PathExpr, PathPattern, Pattern, Query, Term, Var};
+use super::{
+    Call, Filter, Group, Namer, Nearest, PathExpr, PathPattern, Pattern, Query, Term, Var,
+};
 use crate::graph::{Error, Graph, Result};
 use crate::local_table::IdSet;
 use crate::record::Linkage;
@@ -31,6 +33,8 @@ const PROBE_COST: f64 = 1.0;
 const FILTER_COST: f64 = 0.2;
 /// The cost of starting to evaluate a group.
 const GROUP_COST: f64 = 1.0;
+/// Measuring the distance from a vector to one searched.
+const DISTANCE_COST: f64 = 1.0;
 /// The cost of a lookup in reduced links, apart from the links it finds.
 const REDUCED_LOOKUP_COST: f64 = 0.5;
 /// The cost of a reduced link found by a lookup or a scan.
@@ -152,6 +156,13 @@ pub(crate) enum Step {
         call: Call,
         tuples: Tuples,
         given: bool,
+        rows: f64,
+    },
+    /// Joins a search for the values nearest a vector: for each row, those
+    /// of the links its `scan` (planned alone, run once) finds.
+    Nearest {
+        nearest: Nearest,
+        scan: GroupPlan,
         rows: f64,
     },
     Filter(Vec<Filter>),
@@ -432,6 +443,21 @@ fn explain_group(
                     q.call_name(call, name),
                     tuples.len()
                 );
+                first = false;
+            }
+            Step::Nearest {
+                nearest,
+                scan,
+                rows,
+            } => {
+                let how = if first { "scan" } else { "bind join" };
+                let _ = writeln!(
+                    out,
+                    "{pad}{how} {}, rows ~{rows:.0}",
+                    q.nearest_name(nearest, name)
+                );
+                let _ = writeln!(out, "{pad}  searching, once:");
+                explain_group(q, scan, depth + 2, true, name, out);
                 first = false;
             }
             Step::Filter(filters) => {
@@ -787,6 +813,7 @@ enum Item<'q> {
     Path(&'q PathPattern),
     /// A call, its tuples, and whether they were given.
     Call(&'q Call, &'q CallTuples, bool),
+    Nearest(&'q Nearest),
     Union(&'q [Group]),
 }
 
@@ -897,6 +924,7 @@ impl Planner<'_, '_> {
                     .zip(&calls)
                     .map(|(c, (t, given))| Item::Call(c, t, *given)),
             )
+            .chain(group.nearest.iter().map(Item::Nearest))
             .chain(group.unions.iter().map(|u| Item::Union(u)))
             .collect();
         let candidates = reduction.as_ref().and(self.candidates.clone());
@@ -1263,6 +1291,32 @@ impl Planner<'_, '_> {
                         + partial.rows * (REDUCED_LOOKUP_COST + matches * REDUCED_ENTRY_COST),
                     rows,
                 ));
+            }
+            Item::Nearest(n) => {
+                let ready = match n.query {
+                    Term::Id(_) => true,
+                    Term::Var(v) => partial.bound[v.0],
+                };
+                if ready && let Some(scan) = self.plan_group(&n.scan, &unbound) {
+                    n.vars().for_each(|v| after[v.0] = true);
+                    let found = scan.rows.max(1.0);
+                    // A value bound already is kept if it is among them.
+                    let matches = if partial.bound[n.value.0] {
+                        (n.k as f64 / found).min(1.0)
+                    } else {
+                        (n.k as f64).min(found)
+                    };
+                    let rows = partial.rows * matches;
+                    ways.push((
+                        Step::Nearest {
+                            nearest: n.clone(),
+                            scan: scan.clone(),
+                            rows,
+                        },
+                        scan.cost + partial.rows * found * DISTANCE_COST,
+                        rows,
+                    ));
+                }
             }
             Item::Union(branches) => {
                 // The branches' variables: the same in each, but for hidden

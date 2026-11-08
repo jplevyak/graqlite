@@ -267,6 +267,7 @@ enum Part {
     Pattern(usize),
     Path(usize),
     Call(usize),
+    Nearest(usize),
     Union(usize),
     Not(usize),
     Optional(usize),
@@ -284,6 +285,7 @@ impl Group {
         parts.extend((0..self.patterns.len()).map(Part::Pattern));
         parts.extend((0..self.paths.len()).map(Part::Path));
         parts.extend((0..self.calls.len()).map(Part::Call));
+        parts.extend((0..self.nearest.len()).map(Part::Nearest));
         parts.extend((0..self.unions.len()).map(Part::Union));
         parts.extend((0..self.nots.len()).map(Part::Not));
         parts.extend((0..self.optionals.len()).map(Part::Optional));
@@ -305,6 +307,13 @@ impl Group {
             Part::Call(i) => {
                 let v: BTreeSet<Var> = self.calls[i].vars().collect();
                 (v.clone(), v)
+            }
+            Part::Nearest(i) => {
+                let n = &self.nearest[i];
+                let bound: BTreeSet<Var> = [n.value, n.distance].into();
+                let mut used = bound.clone();
+                used.extend(n.query.var());
+                (used, bound)
             }
             Part::Union(i) => {
                 let mut used = BTreeSet::new();
@@ -350,6 +359,7 @@ impl Group {
                 Part::Pattern(i) => g.patterns.push(self.patterns[i]),
                 Part::Path(i) => g.paths.push(self.paths[i].clone()),
                 Part::Call(i) => g.calls.push(self.calls[i].clone()),
+                Part::Nearest(i) => g.nearest.push(self.nearest[i].clone()),
                 Part::Union(i) => g.unions.push(self.unions[i].clone()),
                 Part::Not(i) => g.nots.push(self.nots[i].clone()),
                 Part::Optional(i) => g.optionals.push(self.optionals[i].clone()),
