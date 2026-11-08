@@ -260,6 +260,7 @@ pub fn exists(prefix: &Path) -> bool {
 pub fn remove(prefix: &Path) -> io::Result<()> {
     local::remove(prefix)?;
     stats::remove(prefix)?;
+    vectors::remove(prefix)?;
     times::remove(prefix)
 }
 
@@ -558,6 +559,7 @@ impl Graph {
         };
         g.load_vector_indexes()?;
         if !g.is_reader() {
+            g.load_vector_searches();
             g.feed_vector_searches()?;
         }
         Ok(g)
@@ -735,6 +737,7 @@ impl Graph {
             }
         }
         self.rebuild_vector_searches();
+        self.save_vector_searches(false)?;
         self.save_stats()
     }
 
@@ -1649,6 +1652,7 @@ impl Drop for Graph {
             }
         }
         let _ = self.save_stats();
+        let _ = self.save_vector_searches(true);
     }
 }
 

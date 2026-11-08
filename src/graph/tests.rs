@@ -1395,3 +1395,78 @@ fn vector_indexes_are_declared_checked_and_kept() {
     assert!(g.vector_indexes().is_empty());
     g.link(b, p, text).unwrap();
 }
+
+#[test]
+fn vector_searches_are_saved_and_caught_up() {
+    use crate::vector::{Metric, encode};
+    let dir = TempDir::new("vector-searches");
+    let prefix = dir.prefix("g");
+    let file = crate::mmap::suffixed(&prefix, "vectors");
+    let vectors = |g: &mut Graph, p: u64, from: usize, n: usize| -> Vec<(u64, u64)> {
+        (from..from + n)
+            .map(|i| {
+                let s = g.node().unwrap();
+                let x = i as f32;
+                let v = g.value(&encode(&[x.cos(), x.sin(), 1.0])).unwrap();
+                g.link(s, p, v).unwrap();
+                (s, v)
+            })
+            .collect()
+    };
+    let (p, first, floor) = {
+        let mut g = Graph::open(Some(&prefix), Options::default()).unwrap();
+        let p = g.value(b"embedding").unwrap();
+        g.create_vector_index(&VectorIndex::new(p, 3, Metric::Cosine))
+            .unwrap();
+        g.commit().unwrap();
+        let first = vectors(&mut g, p, 0, 100);
+        g.commit().unwrap();
+        let floor = g.vector_search(p).unwrap().floor;
+        (p, first, floor)
+    };
+    // Saved when dropped, and loaded, not built again: its floor is kept.
+    assert!(file.exists());
+    let mut g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    let search = g.vector_search(p).unwrap();
+    assert_eq!((search.floor, search.hnsw.live_len()), (floor, 100));
+    // Links committed after it was saved are fed it when opened again: as
+    // after a crash, with the file saved before them.
+    drop(search);
+    let saved = std::fs::read(&file).unwrap();
+    let more = vectors(&mut g, p, 100, 50);
+    g.delete_link(first[0].0, p, first[0].1).unwrap();
+    g.commit().unwrap();
+    drop(g);
+    std::fs::write(&file, &saved).unwrap();
+    let g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    let search = g.vector_search(p).unwrap();
+    assert_eq!((search.floor, search.hnsw.live_len()), (floor, 149));
+    let found = |x: f32| {
+        search
+            .search(&[x.cos(), x.sin(), 1.0], 1, g.vector_bound())
+            .unwrap()[0]
+            .0
+    };
+    assert_eq!(found(1.0), first[1].1);
+    assert_eq!(found(120.0), more[20].1);
+    assert_ne!(found(0.0), first[0].1);
+    drop(search);
+    drop(g);
+    // A file that isn't valid is ignored: the search is built again.
+    let mut bytes = std::fs::read(&file).unwrap();
+    bytes.truncate(bytes.len() - 3);
+    std::fs::write(&file, &bytes).unwrap();
+    let g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    let search = g.vector_search(p).unwrap();
+    assert!(search.floor > floor);
+    assert_eq!(search.hnsw.live_len(), 149);
+    drop(search);
+    drop(g);
+    // Dropping the index removes the file, once saved.
+    let mut g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    g.drop_vector_index(p).unwrap();
+    g.commit().unwrap();
+    drop(g);
+    assert!(!file.exists());
+    remove(&prefix).unwrap();
+}

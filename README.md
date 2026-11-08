@@ -223,7 +223,9 @@ batches.
   index of `p`'s objects, saved in the graph: their links must then have
   vectors of its dimension, and searches use its HNSW (`graqlite::hnsw`),
   in memory, fed at each commit, and searched as of a reader's commit or
-  an `as of`.  What it can't answer exactly as the scan would (links not
+  an `as of`.  It is saved to `{prefix}vectors` when the graph is dropped
+  (and at a tick, once changed enough), and on opening loaded and fed
+  what was committed since, or built again.  What it can't answer exactly as the scan would (links not
   yet committed, an overlay with the predicate's links, a subgraph) is
   scanned.
 - **Overlays** (`Overlay`): links held in memory, over the database or

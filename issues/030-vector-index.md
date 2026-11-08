@@ -64,7 +64,7 @@ distance, and a way to ask.
       `distance(a, b, metric)` as an expression function (useful alone)
 - [x] An HNSW over values in memory, fed by `index_records`, with
       tombstones (fed at commits; saving and loading is step 5)
-- [ ] Saved and loaded like `stats`
+- [x] Saved and loaded like `stats`
 - [x] `index vector on P ...` and `delete index`, saved in the graph
 - [x] `nearest(P $q k ?v ?d)` as a built-in relation; `\explain` shows it
       (exact, by a scan, for now)
@@ -89,7 +89,7 @@ distance, and a way to ask.
    committed records only, so a rollback has nothing to undo; links not
    yet committed are a small list scanned exactly, cleared on rollback.
    Entries carry the ids that added and deleted them, for readers.
-5. Saved as `{prefix}vector.<p>` beside the statistics, loaded and caught
+5. (Done.) Saved as `{prefix}vector.<p>` beside the statistics, loaded and caught
    up from the log, or rebuilt.
 6. The benchmark, and example 23.
 
@@ -202,6 +202,29 @@ Step 4 is done:
   against the scan, links not yet committed, deletes seen by readers and
   `as of`, an overlay, rebuilding at `tick`, dropping), and a search after
   reopening.
+
+Step 5 is done:
+
+- **One file, `{prefix}vectors`,** rather than one per predicate: a header
+  (magic, version, the log's uuid, the id the searches are fed to), then
+  each search's declaration, floor and graph (`Hnsw::write`: its
+  generator's state, entry, and each item's id, live ranges, links and
+  elements). Written as the statistics are, to a temporary file, synced
+  and renamed.
+- **When:** when the graph is dropped, if anything changed; at a tick,
+  once the changes since saved are an eighth of the items (at least
+  1024), as the file is as large as the index; and removed once no index
+  is left.
+- **On opening:** loaded if it is valid (`Hnsw::read` checks every link,
+  range and vector) and of this log, with its id within the log, then fed
+  the records committed since, as a commit feeds it. A search whose
+  declaration has changed, or that is missing, is built. So the file is a
+  cache of the log: one lost or stale costs time, not correctness.
+- Tests: `hnsw::tests::reads_what_it_writes` (searches and later inserts
+  the same as the original's, refusing a file cut short or changed), and
+  `vector_searches_are_saved_and_caught_up` (loaded rather than built,
+  fed links committed after it was saved, as after a crash; built again
+  from a file that isn't valid; the file removed with the last index).
 
 ## Open questions
 

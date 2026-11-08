@@ -21,6 +21,7 @@ use std::cmp::Ordering;
 #[cfg(test)]
 use std::collections::HashSet;
 use std::collections::{BinaryHeap, HashMap};
+use std::io::{self, Read, Write};
 
 use crate::vector::{Metric, distance, dot, l2_squared};
 
@@ -255,6 +256,154 @@ impl Hnsw {
             out.items[i].live = live;
         }
         out
+    }
+
+    /// Writes the graph, as [`read`](Self::read) reads it: words little
+    /// endian, links as `u32`s and elements as `f32`s.
+    pub fn write(&self, out: &mut impl Write) -> io::Result<()> {
+        let word = |out: &mut dyn Write, w: u64| out.write_all(&w.to_le_bytes());
+        let metric = match self.metric {
+            Metric::Cosine => 0,
+            Metric::L2 => 1,
+            Metric::Dot => 2,
+        };
+        for w in [
+            self.dims as u64,
+            metric,
+            self.m as u64,
+            self.ef as u64,
+            self.rng,
+            self.entry.map_or(u64::MAX, u64::from),
+            self.items.len() as u64,
+        ] {
+            word(out, w)?;
+        }
+        for item in &self.items {
+            word(out, item.id)?;
+            word(out, item.live.len() as u64)?;
+            for &(from, to) in &item.live {
+                word(out, from)?;
+                word(out, to)?;
+            }
+            word(out, item.links.len() as u64)?;
+            for links in &item.links {
+                word(out, links.len() as u64)?;
+                for &l in links {
+                    out.write_all(&l.to_le_bytes())?;
+                }
+            }
+            for x in item.vector.iter() {
+                out.write_all(&x.to_le_bytes())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads a graph [`write`](Self::write) wrote, checking that it is one:
+    /// its links name its items on their layers, each item's ranges are in
+    /// order, and each vector can be measured.
+    pub fn read(input: &mut impl Read) -> io::Result<Hnsw> {
+        let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid vector index");
+        let word = |input: &mut dyn Read| -> io::Result<u64> {
+            let mut b = [0u8; 8];
+            input.read_exact(&mut b)?;
+            Ok(u64::from_le_bytes(b))
+        };
+        let dims = word(input)? as usize;
+        let metric = match word(input)? {
+            0 => Metric::Cosine,
+            1 => Metric::L2,
+            2 => Metric::Dot,
+            _ => return Err(invalid()),
+        };
+        let (m, ef) = (word(input)? as usize, word(input)? as usize);
+        if dims == 0 || dims > crate::vector::MAX_DIMS || m < 2 || ef < m || m > 1024 {
+            return Err(invalid());
+        }
+        let mut h = Hnsw::new(dims, metric, m, ef);
+        h.rng = word(input)?;
+        let entry = word(input)?;
+        let n = word(input)?;
+        if n > u64::from(u32::MAX) {
+            return Err(invalid());
+        }
+        for i in 0..n as u32 {
+            let id = word(input)?;
+            let ranges = word(input)?;
+            if ranges == 0 || ranges > 1 << 20 {
+                return Err(invalid());
+            }
+            let mut live: Vec<(u64, u64)> = Vec::with_capacity(ranges as usize);
+            for _ in 0..ranges {
+                let (from, to) = (word(input)?, word(input)?);
+                if from > to || live.last().is_some_and(|&(_, t)| t > from) {
+                    return Err(invalid());
+                }
+                live.push((from, to));
+            }
+            let layers = word(input)?;
+            if layers == 0 || layers > 17 {
+                return Err(invalid());
+            }
+            let mut links = Vec::with_capacity(layers as usize);
+            for layer in 0..layers as usize {
+                let len = word(input)?;
+                if len > h.cap(layer) as u64 {
+                    return Err(invalid());
+                }
+                let mut ls = Vec::with_capacity(len as usize);
+                for _ in 0..len {
+                    let mut b = [0u8; 4];
+                    input.read_exact(&mut b)?;
+                    let l = u32::from_le_bytes(b);
+                    if u64::from(l) >= n {
+                        return Err(invalid());
+                    }
+                    ls.push(l);
+                }
+                links.push(ls);
+            }
+            let mut vector = Vec::with_capacity(dims);
+            for _ in 0..dims {
+                let mut b = [0u8; 4];
+                input.read_exact(&mut b)?;
+                vector.push(f32::from_le_bytes(b));
+            }
+            if h.distance(&vector, &vector).is_none() || h.by_id.insert(id, i).is_some() {
+                return Err(invalid());
+            }
+            h.items.push(Item {
+                id,
+                norm: dot(&vector, &vector).sqrt(),
+                vector: vector.into(),
+                live,
+                links,
+            });
+        }
+        h.entry = match entry {
+            u64::MAX if n == 0 => None,
+            e if e < n => Some(e as u32),
+            _ => return Err(invalid()),
+        };
+        for item in &h.items {
+            for (layer, links) in item.links.iter().enumerate() {
+                if links
+                    .iter()
+                    .any(|&l| h.items[l as usize].links.len() <= layer)
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+        // The entry is on the top layer.
+        if let Some(e) = h.entry
+            && h.items
+                .iter()
+                .any(|i| i.links.len() > h.items[e as usize].links.len())
+        {
+            return Err(invalid());
+        }
+        Ok(h)
     }
 
     /// The links per item on `layer`, at most.
@@ -534,6 +683,40 @@ mod tests {
         let q = rng.vector(8);
         let want = exact(&items, |id| live_at(id, 5000), &q, 10, Metric::L2);
         assert!(recall(&r.search(&q, 10, 64, 5000), &want) >= 0.9);
+    }
+
+    #[test]
+    fn reads_what_it_writes() {
+        let mut rng = Rng(3);
+        let mut h = Hnsw::new(6, Metric::Dot, 6, 30);
+        for id in 0..300 {
+            h.insert(id * 7, &rng.vector(6), id);
+        }
+        h.remove(14, 500);
+        let mut bytes = Vec::new();
+        h.write(&mut bytes).unwrap();
+        let r = Hnsw::read(&mut &bytes[..]).unwrap();
+        let q = rng.vector(6);
+        assert_eq!(r.search(&q, 10, 30, 600), h.search(&q, 10, 30, 600));
+        assert_eq!((r.len(), r.live_len()), (300, 299));
+        // It goes on as the original would.
+        let (mut a, mut b) = (h.clone(), r);
+        let v = rng.vector(6);
+        a.insert(5000, &v, 700);
+        b.insert(5000, &v, 700);
+        let (mut x, mut y) = (Vec::new(), Vec::new());
+        a.write(&mut x).unwrap();
+        b.write(&mut y).unwrap();
+        assert_eq!(x, y);
+        // Cut short, or with a metric that isn't one, it is refused.
+        assert!(Hnsw::read(&mut &bytes[..bytes.len() - 1]).is_err());
+        let mut bad = bytes.clone();
+        bad[8] = 9;
+        assert!(Hnsw::read(&mut &bad[..]).is_err());
+        let empty = Hnsw::new(2, Metric::L2, 4, 8);
+        let mut bytes = Vec::new();
+        empty.write(&mut bytes).unwrap();
+        assert!(Hnsw::read(&mut &bytes[..]).unwrap().is_empty());
     }
 
     #[test]
