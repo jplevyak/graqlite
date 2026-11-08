@@ -611,6 +611,7 @@ fn normal(s: &Statement) -> Statement {
             }
         }
         Statement::DeleteRule(n) => Statement::DeleteRule(n.clone()),
+        s @ (Statement::IndexVector { .. } | Statement::DeleteIndex(_)) => s.clone(),
         Statement::InsertGraph { source, graph } => Statement::InsertGraph {
             source: normal_graph(source),
             graph: graph.clone(),
@@ -715,6 +716,10 @@ fn print_round_trips() {
         "delete /a knows ?x where /a knows ?x",
         "delete /a knows /b",
         "delete rule reach",
+        "index vector on embedding dims 3 metric l2 m 8 ef 100",
+        "index vector on \"two words\" dims 768 metric cosine m 16 ef 200",
+        "delete index vector on embedding",
+        "select ?v where nearest(embedding $q 10 ?v ?d dot)",
         "select ?who, ?y where << /alice knows ?who >> since ?y",
         "select ?l where << :?l /alice knows ?x >>",
         "select ?l where << :_:k /a knows ?x >> . _:k since ?l",

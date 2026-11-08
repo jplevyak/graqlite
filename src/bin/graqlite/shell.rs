@@ -21,6 +21,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("\\d", "list predicates and their link counts"),
     ("\\dS", "the same, with graqlite's own predicates"),
     ("\\dr", "list the rules saved in the database"),
+    ("\\di", "list the vector indexes declared"),
     ("\\subgraphs", "list the subgraphs, with their links"),
     ("\\drop NAME", "delete every definition of the rule NAME"),
     ("\\info", "summarize the database"),
@@ -498,6 +499,7 @@ impl Shell {
             "d" => self.predicates(false),
             "dS" => self.predicates(true),
             "dr" => self.rules(),
+            "di" => self.indexes(),
             "subgraphs" => self.subgraphs(),
             "drop" => return self.drop_rule(arg, origin),
             "info" => self.info(),
@@ -578,6 +580,33 @@ impl Shell {
                     ]
                 })
                 .collect(),
+        };
+        table
+            .write(&mut *self.out, self.style)
+            .map_err(|e| e.to_string())?;
+        Ok(String::new())
+    }
+
+    fn indexes(&mut self) -> CommandResult {
+        let rows = self
+            .g
+            .vector_indexes()
+            .iter()
+            .map(|i| {
+                vec![
+                    name_of(&self.g, i.predicate, false),
+                    i.dims.to_string(),
+                    i.metric.name().to_string(),
+                    i.m.to_string(),
+                    i.ef.to_string(),
+                ]
+            })
+            .collect();
+        let table = Table {
+            columns: ["predicate", "dims", "metric", "m", "ef"]
+                .map(String::from)
+                .to_vec(),
+            rows,
         };
         table
             .write(&mut *self.out, self.style)

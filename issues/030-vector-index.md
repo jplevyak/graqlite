@@ -64,7 +64,7 @@ distance, and a way to ask.
       `distance(a, b, metric)` as an expression function (useful alone)
 - [ ] An HNSW over values in memory, fed by `index_records`, with
       tombstones, saved and loaded like `stats`
-- [ ] `index vector on P ...` and `delete index`, saved in the graph
+- [x] `index vector on P ...` and `delete index`, saved in the graph
 - [x] `nearest(P $q k ?v ?d)` as a built-in relation; `\explain` shows it
       (exact, by a scan, for now)
 - [ ] A benchmark: 100 000 vectors of 384 dimensions, recall at 10
@@ -82,8 +82,8 @@ distance, and a way to ask.
    known only when the query runs, so it is a step of its own, with the
    predicate, the query vector (a constant or parameter, at first) and
    `k` given.
-3. `index vector on P …` and `delete index`, saved in the graph as rules
-   are (`graql/saved.rs`), and `\di`.
+3. `index vector on P …` and `delete index` (done), saved in the graph
+   as rules are, and `\di`.
 4. An HNSW of our own (a seeded RNG, so tests are deterministic), fed from
    committed records only, so a rollback has nothing to undo; links not
    yet committed are a small list scanned exactly, cleared on rollback.
@@ -139,6 +139,29 @@ Step 2 is done:
   `nearest_finds_the_k_nearest_values`,
   `nearest_searches_a_reader_as_of_its_commit`, and
   `tests/cli/nearest.graql`.
+
+Step 3 is done:
+
+- **Declarations are the graph's** (`src/graph/indexes.rs`), not GraQL's,
+  so that the index of step 4, in `Graph`, reads them: a link from
+  `/graqlite/indexes` by `graqlite:vector_index` to the predicate, and
+  from that link to its `graqlite:dims`, `metric`, `m` and `ef`. They
+  commit, roll back, and travel in snapshots with the entries around
+  them. `Graph::create_vector_index`, `drop_vector_index`,
+  `vector_indexes` and `vector_index`; the writer keeps them in memory,
+  read again on open, restore and rollback, and a reader reads them as of
+  its commit.
+- **Checked:** declaring one fails if a live link with the predicate
+  hasn't a vector of its dimension, and afterwards `check_link` refuses
+  such a live link (`Error::NotAVector`); dead links aren't checked.
+- **GraQL:** `index vector on P dims N [metric M] [m X] [ef Y]` (cosine,
+  16 and 200 if not given), `delete index vector on P`, and `\di`.
+  `nearest` searches by the index's metric when not given one. `index` is
+  a keyword now, as a statement starting with a plain word would read as
+  a triple after a pattern: a value `index` must be quoted.
+- Tests: `vector_indexes_are_declared_checked_and_kept` (refusals,
+  replacing, rollback, a reader, reopening, a snapshot), the round trips
+  of the statements' text, and `tests/cli/vector-index.graql`.
 
 ## Open questions
 

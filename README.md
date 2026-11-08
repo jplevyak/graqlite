@@ -219,6 +219,9 @@ batches.
   binds `v` to the `k` values of `p`'s links nearest the vector `q`, and
   `d` to their distances (cosine, l2 or dot), searched exactly; the rest
   of the query joins them.  Vectors are values (`graqlite::vector`).
+  `g.create_vector_index(&VectorIndex::new(p, dims, metric))` declares an
+  index of `p`'s objects, saved in the graph: their links must then have
+  vectors of its dimension.
 - **Overlays** (`Overlay`): links held in memory, over the database or
   alone, live or deleting a stored fact, layered (`over`), made from a
   result graph (`Overlay::of_graph`) and written (`insert_into`).  Any plan
@@ -272,8 +275,8 @@ have any predicate.)
 - **Statements:** `select` (with expressions, aggregates, `having`, and `by`,
   `limit` and `offset` before `where` or, as in SQL, after the pattern),
   `verify`, `lookup` (returning a graph), `insert` and
-  `delete` with templates and `where`, `rule` / `delete rule`, `insert graph
-  G`, `maintain`, `author` and `subgraph`, `set`, `data`, `default`,
+  `delete` with templates and `where`, `rule` / `delete rule`, `index vector
+  on P dims N` / `delete index vector on P`, `insert graph G`, `maintain`, `author` and `subgraph`, `set`, `data`, `default`,
   `assume`, `function` and `test`, each query optionally `as of` an id or an
   ISO 8601 time.
 - **Patterns** in Turtle's style (`;`, `,`, `.`), blank nodes (`[ … ]`,
@@ -402,6 +405,7 @@ commands:
 | --------------------------- | ------------------------------------------------- |
 | `\d`, `\dS`                 | the predicates, with their live links and fan out (`S`: with graqlite's own) |
 | `\dr`                       | the rules saved in the database, with their bodies |
+| `\di`                       | the vector indexes declared, with their parameters |
 | `\subgraphs`                | the subgraphs, with their links                   |
 | `\drop NAME`                | delete every definition of a rule                 |
 | `\info`                     | a summary of the database, with the large index entries' pages and how many are free |

@@ -1,0 +1,37 @@
+INSERT 3
+INSERT 3
+ predicate | dims | metric | m | ef
+-----------+------+--------+---+----
+(0 rows)
+INDEX vector on embedding
+INDEX vector on embedding (unchanged)
+ predicate | dims | metric | m | ef
+-----------+------+--------+---+-----
+ embedding | 2    | l2     | 8 | 200
+(1 row)
+ v          | d
+------------+----------
+ [0.6, 0.8] | 0.632456
+(1 row)
+BEGIN
+DELETE INDEX vector on embedding
+ predicate | dims | metric | m | ef
+-----------+------+--------+---+----
+(0 rows)
+ROLLBACK
+ predicate | dims | metric | m | ef
+-----------+------+--------+---+-----
+ embedding | 2    | l2     | 8 | 200
+(1 row)
+INDEX vector on embedding
+ predicate | dims | metric | m  | ef
+-----------+------+--------+----+-----
+ embedding | 2    | cosine | 16 | 200
+(1 row)
+DELETE INDEX vector on embedding
+ predicate | dims | metric | m | ef
+-----------+------+--------+---+----
+(0 rows)
+INDEX vector on embedding
+tests/cli/vector-index.graql:24: error: #797 isn't a vector of 2 dimensions, as its predicate's index needs
+[exit 1]

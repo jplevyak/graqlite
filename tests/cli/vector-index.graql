@@ -1,0 +1,24 @@
+-- A vector index is declared on a predicate, saved in the graph: its
+-- links' objects must be vectors of its dimension, and nearest searches
+-- by its metric unless given one.
+insert /a text "[1, 0]" . /b text "[0.6, 0.8]" . /c text "1 2"
+insert ?x embedding ?v where ?x text ?t . let ?v = vector(?t)
+\di
+index vector on embedding dims 2 metric l2 m 8
+index vector on embedding dims 2 metric l2 m 8
+\di
+select ?v, ?d where nearest(embedding "[0, 1]" 1 ?v ?d)
+-- Declared in a transaction, it is rolled back with it.
+\begin
+delete index vector on embedding
+\di
+\rollback
+\di
+-- Declared again, with other parameters; then dropped.
+index vector on embedding dims 2
+\di
+delete index vector on embedding
+\di
+-- An index refuses vectors of another dimension.
+index vector on embedding dims 2
+insert /d embedding ?v where /a text ?t . let ?v = vector("[1, 2, 3]")

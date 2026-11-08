@@ -1321,3 +1321,75 @@ fn compaction_waits_for_readers() {
     g.compact(horizon).unwrap();
     assert_eq!(g.horizon(), horizon);
 }
+
+#[test]
+fn vector_indexes_are_declared_checked_and_kept() {
+    use crate::vector::{Metric, encode};
+    let dir = TempDir::new("vector-indexes");
+    let prefix = dir.prefix("g");
+    let mut g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    let p = g.value(b"embedding").unwrap();
+    let (a, b) = (g.node().unwrap(), g.node().unwrap());
+    let two = g.value(&encode(&[1.0, 0.0])).unwrap();
+    let three = g.value(&encode(&[1.0, 0.0, 0.0])).unwrap();
+    let text = g.value(b"[1, 0]").unwrap();
+    g.link(a, p, two).unwrap();
+    g.link(b, p, three).unwrap();
+    // Refused while a live link's object isn't a vector of its dimension.
+    let index = VectorIndex::new(p, 2, Metric::L2);
+    assert!(matches!(
+        g.create_vector_index(&index),
+        Err(Error::NotAVector { value, dims: 2 }) if value == three
+    ));
+    assert!(g.vector_indexes().is_empty());
+    g.delete_link(b, p, three).unwrap();
+    assert!(g.create_vector_index(&index).unwrap());
+    assert!(!g.create_vector_index(&index).unwrap());
+    assert_eq!(g.vector_index(p), Some(&index));
+    for bad in [
+        VectorIndex::new(p, 0, Metric::L2),
+        VectorIndex {
+            m: 1,
+            ..index.clone()
+        },
+    ] {
+        assert!(matches!(
+            g.create_vector_index(&bad),
+            Err(Error::InvalidArgument(_))
+        ));
+    }
+    // Live links must have a vector of the dimension; dead ones needn't.
+    for bad in [three, text] {
+        assert!(matches!(g.link(b, p, bad), Err(Error::NotAVector { .. })));
+    }
+    g.link(b, p, two).unwrap();
+    g.delete_link(b, p, two).unwrap();
+    g.commit().unwrap();
+    // Replaced, then rolled back.
+    let replaced = VectorIndex {
+        m: 8,
+        ef: 50,
+        ..VectorIndex::new(p, 2, Metric::Dot)
+    };
+    assert!(g.create_vector_index(&replaced).unwrap());
+    assert_eq!(g.vector_indexes(), std::slice::from_ref(&replaced));
+    let r = g.reader();
+    assert_eq!(r.vector_indexes(), std::slice::from_ref(&index));
+    g.rollback().unwrap();
+    assert_eq!(g.vector_indexes(), std::slice::from_ref(&index));
+    drop(r);
+    // Kept when the graph is opened again.
+    drop(g);
+    let mut g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    assert_eq!(g.vector_indexes(), std::slice::from_ref(&index));
+    // And in a snapshot.
+    let mut snapshot = Vec::new();
+    g.snapshot(&mut snapshot).unwrap();
+    let restored = Graph::restore(None, Options::default(), &mut &snapshot[..]).unwrap();
+    assert_eq!(restored.vector_indexes(), std::slice::from_ref(&index));
+    // Dropped, and then any object is linked.
+    assert!(g.drop_vector_index(p).unwrap());
+    assert!(!g.drop_vector_index(p).unwrap());
+    assert!(g.vector_indexes().is_empty());
+    g.link(b, p, text).unwrap();
+}

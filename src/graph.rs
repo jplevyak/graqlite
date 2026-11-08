@@ -144,6 +144,12 @@ pub enum Error {
         as_of: u64,
         horizon: u64,
     },
+    /// A link's object, with a predicate that has a [vector
+    /// index](Graph::create_vector_index), isn't a vector of its dimension.
+    NotAVector {
+        value: u64,
+        dims: usize,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -161,6 +167,10 @@ impl fmt::Display for Error {
                 f,
                 "as of {as_of} is before {horizon}, the horizon the indexes are compacted to"
             ),
+            Error::NotAVector { value, dims } => write!(
+                f,
+                "#{value} isn't a vector of {dims} dimensions, as its predicate's index needs"
+            ),
         }
     }
 }
@@ -174,7 +184,8 @@ impl std::error::Error for Error {
             Error::InvalidArgument(_)
             | Error::KeyInUse(_)
             | Error::Unresolved(_)
-            | Error::Compacted { .. } => None,
+            | Error::Compacted { .. }
+            | Error::NotAVector { .. } => None,
         }
     }
 }
@@ -275,6 +286,9 @@ pub struct Graph {
     snapshots: Arc<std::sync::Mutex<BTreeMap<u64, usize>>>,
     /// A reader's snapshot, registered there while it lives.
     snapshot: Option<u64>,
+    /// The vector indexes declared (see
+    /// [`create_vector_index`](Self::create_vector_index)).
+    vector_indexes: indexes::VectorIndexes,
 }
 
 /// The bit set in the id of a [ephemeral value](Graph::ephemeral_value):
@@ -524,7 +538,7 @@ impl Graph {
             stats.add(&record, replaces);
         }
         let times = Times::open(local.prefix(), meta.uuid, log)?;
-        Ok(Graph {
+        let mut g = Graph {
             local,
             committed: Arc::new(stats.clone()),
             stats: Arc::new(stats),
@@ -534,7 +548,10 @@ impl Graph {
             published: None,
             snapshots: Default::default(),
             snapshot: None,
-        })
+            vector_indexes: Arc::new([]),
+        };
+        g.load_vector_indexes()?;
+        Ok(g)
     }
 
     /// Creates a graph at `prefix`, or in memory, from a
@@ -585,7 +602,7 @@ impl Graph {
             .unwrap_or_else(|e| e.into_inner())
             .entry(end)
             .or_default() += 1;
-        Graph {
+        let mut r = Graph {
             local,
             stats: Arc::clone(&self.committed),
             committed: Arc::clone(&self.committed),
@@ -595,7 +612,13 @@ impl Graph {
             published: None,
             snapshots: Arc::clone(&self.snapshots),
             snapshot: Some(end),
+            vector_indexes: Arc::new([]),
+        };
+        // As committed: the writer's may include some since.
+        if r.load_vector_indexes().is_err() {
+            r.vector_indexes = Arc::clone(&self.vector_indexes);
         }
+        r
     }
 
     /// A handle that gives readers of the graph as of its latest commit, on
@@ -658,6 +681,7 @@ impl Graph {
     pub fn rollback(&mut self) -> Result<()> {
         self.local.log_mut().abandon_commit()?;
         self.stats = Arc::new((*self.committed).clone());
+        self.load_vector_indexes()?;
         // The ids abandoned are committed as nodes.
         self.publish();
         Ok(())
@@ -910,12 +934,18 @@ impl Graph {
         })
     }
 
-    /// Checks that `fields` make a link here.
+    /// Checks that `fields` make a link here: a live one with a predicate
+    /// that has a vector index has a vector of its dimension.
     fn check_link(&self, fields: &LinkFields) -> Result<()> {
         if fields.subject == 0 || fields.predicate == 0 || fields.object == 0 {
             return Err(Error::InvalidArgument(
                 "a link needs a subject, predicate and object",
             ));
+        }
+        if fields.state == LinkState::Live
+            && let Some(index) = self.vector_index(fields.predicate)
+        {
+            self.check_vector(fields.object, index.dims)?;
         }
         let ids = [
             fields.subject,
@@ -1607,8 +1637,14 @@ impl Drop for Graph {
     }
 }
 
+mod indexes;
 #[cfg(test)]
 mod tests;
+
+pub use indexes::{
+    DIMS_PREDICATE, EF_PREDICATE, INDEXES_KEY, M_PREDICATE, METRIC_PREDICATE,
+    VECTOR_INDEX_PREDICATE, VectorIndex,
+};
 
 /// Whether `record` is a live link replacing a live link of its subject,
 /// predicate and object, as a change of its subgraphs does: for counting

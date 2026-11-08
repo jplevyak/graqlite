@@ -760,6 +760,25 @@ fn write_statement(
             Statement::Author(a) => write!(f, "author {}", Printer::new([]).node(a)),
             Statement::Subgraph(g) => write!(f, "subgraph {}", Printer::new([]).node(g)),
             Statement::DeleteRule(name) => write!(f, "delete rule {name}"),
+            Statement::IndexVector {
+                predicate,
+                dims,
+                metric,
+                m,
+                ef,
+            } => write!(
+                f,
+                "index vector on {} dims {dims} metric {} m {m} ef {ef}",
+                Printer::new([]).node(predicate),
+                metric.name()
+            ),
+            Statement::DeleteIndex(predicate) => {
+                write!(
+                    f,
+                    "delete index vector on {}",
+                    Printer::new([]).node(predicate)
+                )
+            }
         }
     }
 }

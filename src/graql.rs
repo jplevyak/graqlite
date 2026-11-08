@@ -64,6 +64,12 @@
 //!   rules may define a relation, and rules may call themselves and each
 //!   other, but not within a negation of themselves.
 //! - `delete rule name` deletes every definition of the rule `name`.
+//! - `index vector on P dims N [metric M] [m X] [ef Y]` declares a vector
+//!   index of `P`'s objects, saved in the graph (see
+//!   [`Graph::create_vector_index`]): a live link with `P` must then have
+//!   a vector of `N` dimensions, and `nearest` searches by its metric
+//!   (cosine, unless given) when given none.  Declaring it again with other
+//!   parameters replaces it; `delete index vector on P` drops it.
 //!
 //! The changes are not committed.
 //!
@@ -401,7 +407,7 @@ const KEYWORDS: &[&str] = &[
     "lookup", "verify", "rule", "function", "test", "where", "from", "into", "in", "graph",
     "table", "not", "and", "or", "if", "then", "else", "let", "as", "list", "of", "implies",
     "limit", "offset", "by", "integer", "real", "string", "distinct", "boolean", "quit", "true",
-    "false", "optional", "having", "maintain",
+    "false", "optional", "having", "maintain", "index",
 ];
 
 /// Longest first, so that the longest punctuation matches.
@@ -1138,6 +1144,17 @@ pub enum Statement {
     Subgraph(Node),
     /// `delete rule name`: deletes every saved definition of the rule.
     DeleteRule(String),
+    /// `index vector on P dims N [metric M] [m X] [ef Y]`: declares a vector
+    /// index of `P`'s objects (see [`Graph::create_vector_index`]).
+    IndexVector {
+        predicate: Node,
+        dims: usize,
+        metric: crate::vector::Metric,
+        m: usize,
+        ef: usize,
+    },
+    /// `delete index vector on P`: drops `P`'s vector index.
+    DeleteIndex(Node),
     /// `set name = value`: names a constant or a graph for the session.
     Set { name: String, value: SetValue },
     /// `data G`: the graph the session's statements read and write.
@@ -1261,6 +1278,73 @@ impl Parser {
         }
     }
 
+    /// Whether `index vector on` starts at `pos`.
+    fn index_ahead(&self, pos: usize) -> bool {
+        let word = |i: usize, w: &str| matches!(self.tokens.get(pos + i), Some(t) if matches!(&t.token, Token::Ident(x) if x.eq_ignore_ascii_case(w)));
+        matches!(self.tokens.get(pos), Some(t) if t.token == Token::Keyword("index"))
+            && word(1, "vector")
+            && word(2, "on")
+    }
+
+    /// A constant node: a value, key or id.
+    fn node_constant(&mut self, what: &str) -> Result<Node> {
+        match self.next() {
+            Token::Ident(v) | Token::Text(v) => Ok(Node::Value(v)),
+            Token::Key(k) => Ok(Node::Key(k)),
+            Token::Id(id) => Ok(Node::Id(id)),
+            t => self.syntax(format!("expected {what}, found {t}")),
+        }
+    }
+
+    /// The rest of `index vector on P dims N [metric M] [m X] [ef Y]`.
+    fn index_vector(&mut self) -> Result<Statement> {
+        let predicate = self.node_constant("an index's predicate")?;
+        let (mut dims, mut metric, mut m, mut ef) = (
+            None,
+            crate::vector::Metric::Cosine,
+            crate::graph::VectorIndex::M,
+            crate::graph::VectorIndex::EF,
+        );
+        // The options, until something else: the next statement.
+        while let Token::Ident(word) = self.peek().clone() {
+            let word = word.to_ascii_lowercase();
+            if !["dims", "metric", "m", "ef"].contains(&word.as_str()) {
+                break;
+            }
+            self.next();
+            if word == "metric" {
+                metric = match self.next() {
+                    Token::Ident(name) | Token::Text(name) => crate::vector::Metric::of_name(&name),
+                    _ => None,
+                }
+                .map_or_else(|| self.syntax("expected cosine, l2 or dot"), Ok)?;
+                continue;
+            }
+            let n = match self.next() {
+                Token::Number(n) => n.parse::<usize>().ok(),
+                _ => None,
+            };
+            let Some(n) = n else {
+                return self.syntax(format!("expected a number after '{word}'"));
+            };
+            match word.as_str() {
+                "dims" => dims = Some(n),
+                "m" => m = n,
+                _ => ef = n,
+            }
+        }
+        let Some(dims) = dims else {
+            return self.syntax("an index needs 'dims N'");
+        };
+        Ok(Statement::IndexVector {
+            predicate,
+            dims,
+            metric,
+            m,
+            ef,
+        })
+    }
+
     fn keyword(&mut self, k: &'static str) -> bool {
         self.eat(&Token::Keyword(k))
     }
@@ -1360,6 +1444,17 @@ impl Parser {
                 };
                 Ok(Statement::Assume { template, graph })
             }
+            Token::Keyword("delete") if self.index_ahead(self.pos) => {
+                self.pos += 3;
+                Ok(Statement::DeleteIndex(
+                    self.node_constant("an index's predicate")?,
+                ))
+            }
+            Token::Keyword("index") if self.index_ahead(self.pos - 1) => {
+                self.pos += 2;
+                self.index_vector()
+            }
+            Token::Keyword("index") => self.syntax("expected 'index vector on P dims N'"),
             Token::Keyword("delete") if self.keyword("rule") => match self.next() {
                 Token::Ident(name) => Ok(Statement::DeleteRule(name)),
                 t => self.syntax(format!("expected a rule's name, found {t}")),
@@ -3111,8 +3206,12 @@ impl Lowering<'_> {
             _ => Err(invalid(&format!("{what} must be a variable"))),
         };
         let (value, distance) = (var(v, "value")?, var(d, "distance")?);
+        // The index's, if the predicate has one.
         let metric = match metric {
-            None => crate::vector::Metric::Cosine,
+            None => self
+                .g
+                .vector_index(predicate)
+                .map_or(crate::vector::Metric::Cosine, |i| i.metric),
             Some(Node::Value(m) | Node::Symbol(m)) => crate::vector::Metric::of_name(m)
                 .ok_or_else(|| invalid("metric must be cosine, l2 or dot"))?,
             Some(_) => return Err(invalid("metric must be cosine, l2 or dot")),
@@ -4599,7 +4698,9 @@ impl Statement {
                 }
             }
             Statement::Author(n) | Statement::Subgraph(n) => bind_node(n, params)?,
-            Statement::DeleteRule(_) => {}
+            Statement::DeleteRule(_)
+            | Statement::IndexVector { .. }
+            | Statement::DeleteIndex(_) => {}
             Statement::Set { value, .. } => match value {
                 SetValue::Node(n) => bind_node(n, params)?,
                 SetValue::Graph(e) => bind_graph(e, params)?,
@@ -5227,6 +5328,44 @@ impl Session {
                 saved::save(g, rules, rule)?;
                 Ok(Output::Defined(rule.name.clone()))
             }
+            Statement::IndexVector {
+                predicate,
+                dims,
+                metric,
+                m,
+                ef,
+            } => {
+                let p = resolve(g, predicate, true)?.expect("created");
+                let index = graph::VectorIndex {
+                    predicate: p,
+                    dims: *dims,
+                    metric: *metric,
+                    m: *m,
+                    ef: *ef,
+                };
+                let changed = g.create_vector_index(&index)?;
+                Ok(Output::Done(format!(
+                    "INDEX vector on {}{}",
+                    Expr::Node(predicate.clone()),
+                    if changed { "" } else { " (unchanged)" }
+                )))
+            }
+            Statement::DeleteIndex(predicate) => {
+                let dropped = match resolve(g, predicate, false)? {
+                    Some(p) => g.drop_vector_index(p)?,
+                    None => false,
+                };
+                if !dropped {
+                    return Err(Error::Invalid(format!(
+                        "{} has no vector index",
+                        Expr::Node(predicate.clone())
+                    )));
+                }
+                Ok(Output::Done(format!(
+                    "DELETE INDEX vector on {}",
+                    Expr::Node(predicate.clone())
+                )))
+            }
             Statement::DeleteRule(name) => {
                 let saved = self.saved(g)?.clone();
                 let definitions = saved::delete(g, &saved, name)?;
@@ -5676,6 +5815,7 @@ fn each_statement_node(statement: &mut Statement, f: &mut impl FnMut(&mut Node))
             f(g);
         }
         Statement::Author(n) | Statement::Subgraph(n) => f(n),
+        Statement::IndexVector { predicate: n, .. } | Statement::DeleteIndex(n) => f(n),
         Statement::DeleteRule(_) => {}
         Statement::Set { value, .. } => match value {
             SetValue::Node(n) => f(n),
@@ -5792,6 +5932,8 @@ fn each_statement_expr(statement: &mut Statement, f: &mut impl FnMut(&mut Expr))
         | Statement::Author(_)
         | Statement::Subgraph(_)
         | Statement::DeleteRule(_)
+        | Statement::IndexVector { .. }
+        | Statement::DeleteIndex(_)
         | Statement::Function { .. } => {}
     }
 }
@@ -5961,6 +6103,7 @@ fn each_statement_key(statement: &mut Statement, f: &mut impl FnMut(&mut String)
             node(graph, f);
         }
         Statement::Author(n) | Statement::Subgraph(n) => node(n, f),
+        Statement::IndexVector { predicate: n, .. } | Statement::DeleteIndex(n) => node(n, f),
         Statement::DeleteRule(_) => {}
     }
 }
