@@ -168,7 +168,8 @@
 //! - Expressions compute with values: `+ - * / %`, parentheses, and the
 //!   functions of [`Func`] (`abs`, `round`, `str`, `number`, `length`,
 //!   `upper`, `lower`, `contains`, `starts`, `ends`, `concat`, `bound`, `id`,
-//!   `when`, `author`, `time`, `iso`).  Values are stored untyped, and
+//!   `when`, `author`, `time`, `iso`, `vector`, `distance`).  Values are
+//!   stored untyped, and
 //!   computation is typed: text that is a number is a number, and an entry
 //!   is its data (or key) as text.  A value that can't be computed is
 //!   unbound, which no comparison holds for.  A comparison may compare
@@ -176,7 +177,16 @@
 //!   (`contains(?n, "a")`), and `let ?v = expr` names an expression for
 //!   later ones; `?v` can't be matched in a triple.  A select column may be
 //!   an expression (`upper(?n) as ?name`), and an aggregate's argument too.
-//!   Write `/` with spaces in an expression: `/2` is a key.
+//!   An `insert … where` template may use a `let`'s variable: its value is
+//!   written as a value.  Write `/` with spaces in an expression: `/2` is a
+//!   key.
+//! - Vectors (see [`vector`](crate::vector)) are values too: `vector(x)`
+//!   makes one from text such as `"[0.1, 0.2]"` (or is the vector `x` is),
+//!   `str` writes one as text, and `distance(a, b[, metric])` measures
+//!   between two by `"cosine"` (the default), `"l2"` or `"dot"`, nearer
+//!   smaller: `insert ?d embedding ?v where ?d text ?t . let ?v =
+//!   vector(?t)` stores some, and `?d embedding ?v . distance(?v,
+//!   vector($q)) < 0.2` finds those near another.
 //! - `<< s p o >>` is a link node: the live link `s p o`, as a node, to
 //!   make statements about links (`<< /a knows /b >> since 2019`).  Unlike
 //!   an RDF-star quoted triple, the link must be there.  `<< :?l s p o >>`
@@ -4277,21 +4287,88 @@ fn bindings(
     rules: &[RuleDef],
     pattern: Option<&Pattern>,
     view: Option<&Arc<Overlay>>,
-) -> Result<Vec<HashMap<String, u64>>> {
+) -> Result<(Vec<HashMap<String, u64>>, Holds)> {
     let Some(pattern) = pattern else {
-        return Ok(vec![HashMap::new()]);
+        return Ok((vec![HashMap::new()], Holds::default()));
     };
     let (mut q, map) = lower(g, rules, pattern)?;
-    let names = bound_names(pattern, true);
-    q.select(names.iter().map(|n| map[n]));
-    let rows = match view {
-        Some(v) => q.run_over(g, v)?,
-        None => q.run(g)?,
+    let names = binding_names(pattern)?;
+    let lets = lets(pattern)?;
+    let params: HashMap<String, Var> = q
+        .params()
+        .iter()
+        .map(|&v| (q.name(v).to_string(), v))
+        .collect();
+    let mut selected = Vec::new();
+    for n in &names {
+        selected.push(match map.get(n) {
+            Some(&v) if !lets.contains_key(n) => v,
+            _ => {
+                let mut var = |v: &str| {
+                    map.get(v).copied().ok_or_else(|| Error::Syntax {
+                        line: 0,
+                        column: 0,
+                        message: format!("?{v} is not in the pattern"),
+                    })
+                };
+                let e = compile_with(
+                    g,
+                    &Expr::Node(Node::Var(n.clone())),
+                    &lets,
+                    &params,
+                    &mut var,
+                    0,
+                )?;
+                q.compute(n, e)
+            }
+        });
+    }
+    q.select(selected);
+    let holds = Holds::of(&q, view.map(|v| &**v));
+    // A value computed by a `let` is an ephemeral one, held by the query,
+    // which an insert writes as a value.
+    let rows = if q.computes() {
+        let rows = match view {
+            Some(v) => q.cells_over(g, v)?,
+            None => q.cells(g)?,
+        };
+        rows.into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|c| match c {
+                        Cell::Id(id) => id,
+                        Cell::Unbound => 0,
+                        c => c.data(g).map_or(0, |d| q.ephemeral_value(g, &d)),
+                    })
+                    .collect()
+            })
+            .collect()
+    } else {
+        match view {
+            Some(v) => q.run_over(g, v)?,
+            None => q.run(g)?,
+        }
     };
-    Ok(rows
-        .into_iter()
-        .map(|row| names.iter().cloned().zip(row).collect())
-        .collect())
+    Ok((
+        rows.into_iter()
+            .map(|row: Vec<u64>| names.iter().cloned().zip(row).collect())
+            .collect(),
+        holds,
+    ))
+}
+
+/// The names a template can use of `pattern`'s rows: those it binds by
+/// matching, and those its `let`s compute.
+fn binding_names(pattern: &Pattern) -> Result<Vec<String>> {
+    let mut names = bound_names(pattern, true);
+    let mut computed: Vec<String> = lets(pattern)?.into_keys().collect();
+    computed.sort();
+    for n in computed {
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    Ok(names)
 }
 
 /// Runs a parsed statement on `g`, with no rules defined.
@@ -5196,7 +5273,7 @@ impl Session {
             } => {
                 let insert = matches!(statement, Statement::Insert { .. });
                 if self.data.is_some() {
-                    let rows = bindings(g, rules, pattern.as_ref(), view.as_ref())?;
+                    let (rows, _holds) = bindings(g, rules, pattern.as_ref(), view.as_ref())?;
                     let n = self.write_data(g, insert, template, graph.as_ref(), rows)?;
                     return Ok(if insert {
                         Output::Inserted(n)
@@ -5204,10 +5281,10 @@ impl Session {
                         Output::Deleted(n)
                     });
                 }
-                let bound = pattern
-                    .as_ref()
-                    .map(|p| bound_names(p, true))
-                    .unwrap_or_default();
+                let bound = match pattern {
+                    Some(p) => binding_names(p)?,
+                    None => Vec::new(),
+                };
                 // Variables naming a template's links are bound by it.
                 let named: Vec<&String> = template
                     .iter()
@@ -5242,7 +5319,8 @@ impl Session {
                     None => None,
                 };
                 let mut count = 0;
-                for row in bindings(g, rules, pattern.as_ref(), view.as_ref())? {
+                let (rows, _holds) = bindings(g, rules, pattern.as_ref(), view.as_ref())?;
+                for row in rows {
                     // A blank node of the template is a new node for each row,
                     // and a link node's name is bound to its link.
                     let mut blanks: HashMap<String, u64> = HashMap::new();

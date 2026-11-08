@@ -33,6 +33,7 @@ pub mod stats;
 pub mod times;
 #[cfg(all(unix, target_pointer_width = "64"))]
 pub mod tuple_index;
+pub mod vector;
 
 pub use error::{Error, Result};
 pub use record::{Link, LinkFields, LinkState, Linkage, Record, RecordSet, Uuid};

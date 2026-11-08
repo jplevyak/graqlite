@@ -377,7 +377,8 @@ impl Overlay {
                                 out.ephemeral_hold(g).value(g, t.as_bytes())
                             }
                             ResultNode::Value(c) => {
-                                out.ephemeral_hold(g).value(g, c.to_string().as_bytes())
+                                let d = c.data(g).unwrap_or_default();
+                                out.ephemeral_hold(g).value(g, &d)
                             }
                             ResultNode::Key(k) => out.ephemeral_hold(g).key(g, k.as_bytes()),
                             ResultNode::Blank(n) => match blanks.get(n) {

@@ -60,7 +60,7 @@ distance, and a way to ask.
 
 ## Tasks
 
-- [ ] The vector value encoding, `vector(...)`, `str` of a vector, and
+- [x] The vector value encoding, `vector(...)`, `str` of a vector, and
       `distance(a, b, metric)` as an expression function (useful alone)
 - [ ] An HNSW over values in memory, fed by `index_records`, with
       tombstones, saved and loaded like `stats`
@@ -70,6 +70,47 @@ distance, and a way to ask.
       against brute force, and queries per second
 - [ ] Example 23: documents with embeddings, searched and then filtered
       by their links
+
+## Plan
+
+1. Vector values and functions (done).
+2. `nearest` as an exact scan of a predicate's live links, so the query
+   surface, `as of` and readers are settled first, and the benchmark has
+   brute force to measure recall against. It can't be a relation with
+   tuples computed at plan time (`Step::Call`): `$q` and `as of` are
+   known only when the query runs, so it is a step of its own, with the
+   predicate, the query vector (a constant or parameter, at first) and
+   `k` given.
+3. `index vector on P …` and `delete index`, saved in the graph as rules
+   are (`graql/saved.rs`), and `\di`.
+4. An HNSW of our own (a seeded RNG, so tests are deterministic), fed from
+   committed records only, so a rollback has nothing to undo; links not
+   yet committed are a small list scanned exactly, cleared on rollback.
+   Entries carry the ids that added and deleted them, for readers.
+5. Saved as `{prefix}vector.<p>` beside the statistics, loaded and caught
+   up from the log, or rebuilt.
+6. The benchmark, and example 23.
+
+## Progress
+
+Step 1 is done:
+
+- **`src/vector.rs`:** the encoding (header byte `0xF8`, which UTF-8
+  never has, then `f32`s little endian), `parse` and `format` of the text
+  form `[0.1, 0.2]`, and `distance` by `Metric` (cosine, l2, dot), each
+  smaller for nearer.
+- **`Cell::Vector`**, a computed vector. A cell's `data` is what a value
+  holding it stores (a vector's encoding), and `Cell::of_data` reads a
+  value's data back as a vector or text. Computed values are made from
+  their data, not their text, so a vector stays a vector.
+- **GraQL:** `vector(x)` (from text, or the vector `x` is), `str` of one,
+  and `distance(a, b[, metric])`. The shell shows a stored vector as its
+  text.
+- **`insert … where` templates may use a `let`'s variable**, written as
+  a value: `insert ?d embedding ?v where ?d text ?t . let ?v =
+  vector(?t)`. Without it GraQL had no way to store a vector.
+- Tests: `vector::tests`, `vectors_are_stored_encoded_and_measured`, and
+  `tests/cli/vectors.graql`.
 
 ## Open questions
 

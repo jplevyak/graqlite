@@ -99,6 +99,9 @@ pub fn name_of(g: &Graph, id: u64, literal: bool) -> String {
         return key.to_string();
     }
     let data = g.data(id);
+    if let Some(v) = data.as_deref().and_then(graqlite::vector::decode) {
+        return graqlite::vector::format(&v);
+    }
     match data.as_deref().map(std::str::from_utf8) {
         Some(Ok(text)) if literal => graql::literal(text),
         Some(Ok(text)) => text.to_string(),

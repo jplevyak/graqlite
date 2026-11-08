@@ -2604,6 +2604,56 @@ fn aggregates_as_links() {
 }
 
 #[test]
+fn vectors_are_stored_encoded_and_measured() {
+    let mut g = graph();
+    let mut s = Session::new();
+    s.execute(
+        &mut g,
+        "insert /a text \"[1, 0]\" . /b text \"0.6 0.8\" . /c text \"not one\"",
+    )
+    .unwrap();
+    s.execute(
+        &mut g,
+        "insert ?d embedding ?v where ?d text ?t . let ?v = vector(?t)",
+    )
+    .unwrap();
+    let embedding = g.find_value(b"embedding").unwrap();
+    let a = g.find_by_key(b"/a").unwrap();
+    let v = g.property(a, embedding).unwrap();
+    assert_eq!(
+        g.data(v).as_deref(),
+        Some(&crate::vector::encode(&[1.0, 0.0])[..])
+    );
+    // Text that isn't a vector is unbound, so no link is inserted for it.
+    let c = g.find_by_key(b"/c").unwrap();
+    assert_eq!(g.property(c, embedding), None);
+    // Nothing computed is left held.
+    assert_eq!(g.ephemeral_count(), 0);
+    let out = s
+        .execute(
+            &mut g,
+            "select ?d, str(?v) as ?s, distance(?v, vector(\"[0, 1]\"), \"l2\") as ?l by ?d \
+             where ?d embedding ?v",
+        )
+        .unwrap();
+    assert_eq!(
+        texts(&g, &out[0]),
+        vec![
+            vec!["/a", "[1, 0]", "1.414214"],
+            vec!["/b", "[0.6, 0.8]", "0.632456"],
+        ]
+    );
+    // An unknown metric is unbound.
+    let out = s
+        .execute(
+            &mut g,
+            "select distance(?v, ?v, \"manhattan\") as ?m where /a embedding ?v",
+        )
+        .unwrap();
+    assert_eq!(texts(&g, &out[0]), vec![vec![""]]);
+}
+
+#[test]
 fn queries_free_the_ephemeral_values_they_compute() {
     let mut g = graph();
     let mut s = Session::new();

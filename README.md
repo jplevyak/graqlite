@@ -275,7 +275,8 @@ have any predicate.)
 - **Patterns** in Turtle's style (`;`, `,`, `.`), blank nodes (`[ … ]`,
   `_:x`), `/keys`, `#ids`, `$params`, `and`, `or`, `not`, `optional ( … )` and
   the `-` modifier, comparisons and expressions (`let ?t = ?p * ?q . ?t >
-  100`, with string, number and time functions), link nodes (`<< /a knows /b
+  100`, with string, number, time and vector functions: `vector("[0.1,
+  0.2]")`, `distance(?a, ?b, "cosine")`), link nodes (`<< /a knows /b
   >> since 2019`), transitive predicates (`p++`), path expressions (`?x (knows+
   / ^parent | guardian{1,3}) ?y`, with keys as steps), and calls of rules.
 - **The tour's shorter forms:** a predicate without an object (`?s type`), a
@@ -566,6 +567,7 @@ src/
   stats.rs            per-predicate link statistics for query planning
   times.rs            the time of each commit, mapping times to ids, and
                       ISO 8601 times
+  vector.rs           vectors as values: encoding, text and distances
   graph.rs            Graph: the graph database API, subgraphs, compaction,
                       readers, ephemeral values (tests in graph/)
   query/              pattern queries: types and builders (mod.rs), the

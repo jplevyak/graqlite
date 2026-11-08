@@ -42,6 +42,7 @@ use super::aggregate::{Cell, Number, compare_cells};
 use super::{Cmp, Var, compare_data};
 use crate::graph::Graph;
 use crate::times::{format_time, parse_time};
+use crate::vector::Metric;
 
 /// An expression over the variables of a row.
 #[derive(Debug, Clone, PartialEq)]
@@ -308,6 +309,7 @@ impl Expr {
             Expr::Const(Cell::Int(n)) => (n.to_string(), 5),
             Expr::Const(Cell::Float(x)) => (x.to_string(), 5),
             Expr::Const(Cell::Bool(b)) => (b.to_string(), 5),
+            Expr::Const(Cell::Vector(v)) => (format!("vector({:?})", crate::vector::format(v)), 5),
             Expr::Const(Cell::Unbound) => ("unbound".to_string(), 5),
             Expr::Call(f, args) => {
                 let args: Vec<String> = args.iter().map(|a| a.show_in(var, id, 0)).collect();
@@ -459,6 +461,10 @@ pub enum Func {
     /// number of milliseconds.
     Time,
     Iso,
+    /// A vector, from its text (see [`vector`](crate::vector)), and the
+    /// distance between two by a metric, cosine if not given.
+    Vector,
+    Distance,
 }
 
 const FUNCS: &[(Func, &str, usize, usize)] = &[
@@ -484,6 +490,8 @@ const FUNCS: &[(Func, &str, usize, usize)] = &[
     (Func::Author, "author", 1, 1),
     (Func::Time, "time", 1, 1),
     (Func::Iso, "iso", 1, 1),
+    (Func::Vector, "vector", 1, 1),
+    (Func::Distance, "distance", 2, 3),
 ];
 
 impl Func {
@@ -633,6 +641,24 @@ fn call(g: &Graph, f: Func, args: &[Cell]) -> Cell {
             Some(Number::Int(n)) if n >= 0 => Cell::Text(format_time(n as u64)),
             _ => Cell::Unbound,
         },
+        Func::Vector => args
+            .first()
+            .and_then(|c| c.vector(g))
+            .map_or(Cell::Unbound, Cell::Vector),
+        Func::Distance => {
+            let metric = match text(2) {
+                None if args.len() < 3 => Some(Metric::Cosine),
+                None => None,
+                Some(name) => Metric::of_name(&name),
+            };
+            let vector = |i: usize| args.get(i).and_then(|c| c.vector(g));
+            match (vector(0), vector(1), metric) {
+                (Some(a), Some(b), Some(m)) => {
+                    crate::vector::distance(&a, &b, m).map_or(Cell::Unbound, Cell::Float)
+                }
+                _ => Cell::Unbound,
+            }
+        }
     }
 }
 
@@ -699,7 +725,7 @@ fn order(g: &Graph, a: &Cell, b: &Cell) -> Option<Ordering> {
     }
     let data = |c: &Cell| match c {
         Cell::Id(id) => g.data(*id).map(std::borrow::Cow::into_owned),
-        other => other.text(g).map(String::into_bytes),
+        other => other.data(g),
     };
     match (data(a), data(b)) {
         (Some(x), Some(y)) => Some(compare_data(&x, &y)),

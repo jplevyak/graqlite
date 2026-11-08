@@ -243,7 +243,7 @@ fn value_id(q: &Query, g: &Graph, c: Cell) -> Option<u64> {
     match c {
         Cell::Id(id) => Some(id),
         Cell::Unbound => None,
-        c => Some(q.ephemeral_value(g, c.text(g)?.as_bytes())),
+        c => Some(q.ephemeral_value(g, &c.data(g)?)),
     }
 }
 

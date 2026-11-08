@@ -1,17 +1,19 @@
 //! Computed values, and aggregates: rows grouped and folded.
 //!
 //! A query's row is a list of ids, and a [`Cell`] can also hold a computed
-//! value: a number, text or a boolean.  [`Aggregation::apply`] groups rows
-//! of cells by some columns and folds the others with [`Function`]s.  A row's
-//! id 0 is unbound (from an optional group), which aggregates skip, except
-//! `count(*)`.
+//! value: a number, text, a boolean or a [`vector`].
+//! [`Aggregation::apply`] groups rows of cells by some columns and folds the
+//! others with [`Function`]s.  A row's id 0 is unbound (from an optional
+//! group), which aggregates skip, except `count(*)`.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 
 use crate::graph::Graph;
+use crate::vector;
 
 /// A value in a row of results: an entry, a computed value, or nothing.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +23,8 @@ pub enum Cell {
     Float(f64),
     Text(String),
     Bool(bool),
+    /// A vector's elements (see [`vector`]).
+    Vector(Arc<[f32]>),
     /// Unbound, as from an optional group, or a value that could not be
     /// computed (the average of no numbers, text that is not a number).
     Unbound,
@@ -35,10 +39,19 @@ pub enum CellKey {
     Float(u64),
     Text(String),
     Bool(bool),
+    Vector(Vec<u32>),
     Unbound,
 }
 
 impl Cell {
+    /// The cell of a value's data: a vector, or text.
+    pub fn of_data(data: &[u8]) -> Cell {
+        match vector::decode(data) {
+            Some(v) => Cell::Vector(v.into()),
+            None => Cell::Text(String::from_utf8_lossy(data).into_owned()),
+        }
+    }
+
     /// The cell of an id from a row: 0 is unbound.
     pub fn of_id(id: u64) -> Cell {
         if id == 0 { Cell::Unbound } else { Cell::Id(id) }
@@ -51,6 +64,7 @@ impl Cell {
             Cell::Float(x) => CellKey::Float(x.to_bits()),
             Cell::Text(t) => CellKey::Text(t.clone()),
             Cell::Bool(b) => CellKey::Bool(*b),
+            Cell::Vector(v) => CellKey::Vector(v.iter().map(|x| x.to_bits()).collect()),
             Cell::Unbound => CellKey::Unbound,
         }
     }
@@ -67,24 +81,54 @@ impl Cell {
             Cell::Float(x) => Some(Number::Float(*x)),
             Cell::Id(id) => parse_number(std::str::from_utf8(&g.data(*id)?).ok()?),
             Cell::Text(t) => parse_number(t),
-            Cell::Bool(_) | Cell::Unbound => None,
+            Cell::Bool(_) | Cell::Vector(_) | Cell::Unbound => None,
         }
     }
 
     /// The cell as text: an entry's data, or its key if it has no data;
-    /// a number or boolean as written.  `None` for an entry with neither,
-    /// and for unbound.
+    /// a number, boolean or vector as written.  `None` for an entry with
+    /// neither, and for unbound.
     pub fn text(&self, g: &Graph) -> Option<String> {
         match self {
             Cell::Id(id) => g
                 .data(*id)
                 .or_else(|| g.key(*id))
-                .map(|d| String::from_utf8_lossy(&d).into_owned()),
+                .map(|d| match vector::decode(&d) {
+                    Some(v) => vector::format(&v),
+                    None => String::from_utf8_lossy(&d).into_owned(),
+                }),
+            Cell::Vector(v) => Some(vector::format(v)),
             Cell::Int(n) => Some(n.to_string()),
             Cell::Float(x) => Some(format_float(*x)),
             Cell::Text(t) => Some(t.clone()),
             Cell::Bool(b) => Some(b.to_string()),
             Cell::Unbound => None,
+        }
+    }
+
+    /// The data of a value holding the cell: an entry's data (or key), a
+    /// vector's encoding, or the text of another.
+    pub fn data(&self, g: &Graph) -> Option<Vec<u8>> {
+        match self {
+            Cell::Id(id) => g.data(*id).or_else(|| g.key(*id)).map(Cow::into_owned),
+            Cell::Vector(v) => Some(vector::encode(v)),
+            c => c.text(g).map(String::into_bytes),
+        }
+    }
+
+    /// The vector the cell is, or its entry's data or its text is.
+    pub fn vector(&self, g: &Graph) -> Option<Arc<[f32]>> {
+        match self {
+            Cell::Vector(v) => Some(Arc::clone(v)),
+            Cell::Id(id) => {
+                let d = g.data(*id)?;
+                match vector::decode(&d) {
+                    Some(v) => Some(v.into()),
+                    None => vector::parse(std::str::from_utf8(&d).ok()?).map(Into::into),
+                }
+            }
+            Cell::Text(t) => vector::parse(t).map(Into::into),
+            _ => None,
         }
     }
 }
@@ -98,6 +142,7 @@ impl fmt::Display for Cell {
             Cell::Float(x) => f.write_str(&format_float(*x)),
             Cell::Text(t) => f.write_str(t),
             Cell::Bool(b) => write!(f, "{b}"),
+            Cell::Vector(v) => f.write_str(&vector::format(v)),
             Cell::Unbound => Ok(()),
         }
     }
@@ -130,6 +175,7 @@ pub fn compare_cells(g: &Graph, a: &Cell, b: &Cell) -> Ordering {
             Cell::Unbound => (0, 0.0, none(), 0),
             Cell::Bool(b) => (2, f64::from(u8::from(*b)), none(), 0),
             Cell::Text(t) => (3, 0.0, Cow::Borrowed(t.as_bytes()), 0),
+            Cell::Vector(v) => (3, 0.0, Cow::Owned(vector::encode(v)), 0),
             Cell::Id(id) => match g.data(*id) {
                 Some(d) => (3, 0.0, d, 0),
                 None => (4, 0.0, none(), *id),

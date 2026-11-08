@@ -2029,9 +2029,7 @@ impl Plan {
                         Cell::Unbound => 0,
                         other => {
                             cells.push((v.0, other.clone()));
-                            other
-                                .text(g)
-                                .map_or(0, |t| q.ephemeral_value(g, t.as_bytes()))
+                            other.data(g).map_or(0, |d| q.ephemeral_value(g, &d))
                         }
                     };
                 }
@@ -2450,7 +2448,7 @@ type BySubject<'t> = HashMap<(u64, u64), Vec<&'t Vec<u64>>>;
 fn result_node(g: &Graph, id: u64) -> ResultNode {
     if id & EPHEMERAL != 0 {
         if let Some(d) = g.data(id) {
-            return ResultNode::Value(Cell::Text(String::from_utf8_lossy(&d).into_owned()));
+            return ResultNode::Value(Cell::of_data(&d));
         }
         if let Some(k) = g.key(id) {
             return ResultNode::Key(String::from_utf8_lossy(&k).into_owned());

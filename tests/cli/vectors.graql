@@ -1,0 +1,13 @@
+-- Vectors are values: vector() makes one from text, str() writes one,
+-- and distance() measures between two, nearer smaller.
+insert /a name "a" . /b name "b" . /c name "c"
+select vector("[1, 0, 0.5]") as ?v, str(vector("0.25 0.5")) as ?s where /a name ?_
+select distance(vector("1,0"), vector("0,2")) as ?cosine, distance(vector("1,0"), vector("0,2"), "l2") as ?l2, distance(vector("1,2"), vector("3,4"), "dot") as ?dot, distance(vector("1"), vector("1,2")) as ?unbound where /a name ?_
+-- Stored by a let, as a value of its own encoding.
+insert ?x embedding ?v where ?x name "a" . let ?v = vector("[1, 0]")
+insert ?x embedding ?v where ?x name "b" . let ?v = vector("[0.6, 0.8]")
+insert ?x embedding ?v where ?x name "c" . let ?v = vector("[0, 1]")
+select ?x, ?v, distance(?v, vector("1 0")) as ?d by ?d where ?x embedding ?v
+-- Those near a vector, and one equal to it.
+select ?x where ?x embedding ?v . distance(?v, vector("[1, 0.1]")) < 0.3
+select ?x where ?x embedding ?v . ?v = vector("0.6, 0.8")
