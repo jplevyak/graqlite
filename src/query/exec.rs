@@ -888,8 +888,8 @@ impl Lookup for Matcher {
                 .range(..=as_of)
                 .filter_map(|&id| {
                     let f = g.get(id).ok()?.as_link()?.fields();
-                    let links = g.find_links(f.subject, f.predicate, f.object);
-                    let latest = *links.range(..=as_of).next_back()?;
+                    let (latest, _) =
+                        g.latest_link_as_of(f.subject, f.predicate, f.object, Some(as_of))?;
                     (latest == id && f.state == crate::record::LinkState::Live)
                         .then_some((id, [f.subject, f.predicate, f.object]))
                 })
@@ -2610,8 +2610,7 @@ fn stored(
     {
         return ov.fact([s, p, o]).filter(|l| l.live).map(|l| l.id);
     }
-    live_links(g, &g.find_links(s, p, o), as_of)
-        .into_iter()
-        .find(|&(_, f)| f == [s, p, o])
+    g.latest_link_as_of(s, p, o, as_of)
+        .filter(|&(_, state)| state == crate::record::LinkState::Live)
         .map(|(id, _)| id)
 }

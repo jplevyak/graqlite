@@ -369,7 +369,9 @@ pub fn links_newest_first(local: &Local, key: LinkKey, as_of: Option<u64>) -> Id
 
 /// The links of `key` appended by `as_of` (all of them if `None`).
 pub fn links_up_to(local: &Local, key: LinkKey, as_of: Option<u64>) -> IdSet {
-    links_newest_first(local, key, as_of).collect()
+    let mut ids: Vec<u64> = links_newest_first(local, key, as_of).collect();
+    ids.reverse();
+    IdSet::from_sorted(ids)
 }
 
 /// The number of links of `key`, of any age; for a large entry, without

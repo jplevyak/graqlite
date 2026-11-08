@@ -484,7 +484,14 @@ impl Writer {
     }
 
     pub fn get(&self, key: u64, key2: u64) -> Option<Lookup> {
-        self.reader().get(key, key2)
+        let mut values = Vec::new();
+        let bit = self.get_into(key, key2, &mut values)?;
+        Some(Lookup { bit, values })
+    }
+
+    /// Looks up a key, filling `values` and returning the extra bit if found.
+    pub fn get_into(&self, key: u64, key2: u64, values: &mut Vec<u64>) -> Option<bool> {
+        self.shared.lookup(key, key2, values)
     }
 
     /// Appends 1 to [`MAX_VALUES`] values to a key and sets its extra bit.

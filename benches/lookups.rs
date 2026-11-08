@@ -2,7 +2,8 @@
 //! lookup alone (a count), the entry read and collected, the log record,
 //! and the live links of the entry; a point query, planned each time and
 //! prepared; then a join of two large entries, with and without reduction,
-//! and its planning alone.
+//! and its planning alone; then the write path, and finding values by
+//! their data.
 //!
 //! The graph is that of `benches/index.rs`: `GRAQLITE_BENCH_PEOPLE` people
 //! (default 40 000), each with a `type`, a `city` and an `age`.  Each
@@ -220,5 +221,65 @@ fn bench(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench);
+/// The write path, per link, and finding values by their data: linking a
+/// fact that is live already (its latest link found, and nothing written),
+/// linking new facts (rolled back after), and finding values and keys of
+/// 24 bytes, which are found by their hash.
+fn bench_writes(c: &mut Criterion) {
+    let mut d = load();
+    let n = d.g.stats().links();
+    let likes = d.g.value(b"likes").unwrap();
+    let texts: Vec<String> = (0..SAMPLE)
+        .map(|i| format!("a value of a few words {i:02}"))
+        .collect();
+    let keys: Vec<String> = (0..SAMPLE).map(|i| format!("/person/{i:016}")).collect();
+    for (t, k) in texts.iter().zip(&keys) {
+        d.g.value(t.as_bytes()).unwrap();
+        d.g.node_by_key(k.as_bytes()).unwrap();
+    }
+    d.g.commit().unwrap();
+    let mut group = c.benchmark_group("writes of 1000");
+    group
+        .sample_size(20)
+        .measurement_time(Duration::from_secs(3));
+    group.bench_function(BenchmarkId::new("link a live fact", n), |b| {
+        b.iter(|| {
+            for &p in &d.people {
+                black_box(d.g.link(p, d.type_, d.person).unwrap());
+            }
+        })
+    });
+    group.bench_function(BenchmarkId::new("link a new fact", n), |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t = std::time::Instant::now();
+                for w in d.people.windows(2) {
+                    black_box(d.g.link(w[0], likes, w[1]).unwrap());
+                }
+                total += t.elapsed();
+                d.g.rollback().unwrap();
+            }
+            total
+        })
+    });
+    group.bench_function(BenchmarkId::new("find_value of 24 bytes", n), |b| {
+        b.iter(|| {
+            texts
+                .iter()
+                .filter_map(|t| d.g.find_value(t.as_bytes()))
+                .count()
+        })
+    });
+    group.bench_function(BenchmarkId::new("find_by_key of 24 bytes", n), |b| {
+        b.iter(|| {
+            keys.iter()
+                .filter_map(|k| d.g.find_by_key(k.as_bytes()))
+                .count()
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench, bench_writes);
 criterion_main!(benches);

@@ -1,6 +1,6 @@
 # `\explain analyze`: actual rows and time beside the estimates
 
-**Status:** open · **Size:** small · **Related:** [012](closed/012-reduce-only-when-it-pays.md) (estimates the planner makes), [013](closed/013-prepared-queries.md), [026](026-index-lookup-allocations.md)
+**Status:** open · **Size:** small · **Related:** [012](closed/012-reduce-only-when-it-pays.md) (estimates the planner makes), [013](closed/013-prepared-queries.md), [026](closed/026-index-lookup-allocations.md)
 
 ## Motivation
 

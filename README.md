@@ -635,7 +635,8 @@ benchmarks' numbers on one machine, to compare a change with.
 graqlite's runtime dependencies are [libc](https://crates.io/crates/libc), for
 memory mapping, [arc-swap](https://crates.io/crates/arc-swap), for the index
 levels that lookups hold, [sha2](https://crates.io/crates/sha2), for value
-uuids, and [regex-lite](https://crates.io/crates/regex-lite), for GraQL's `~`.
+uuids (the SHA-256 of a value's data, folded to 128 bits, keys the value
+index, so the hash is part of the on-disk format), and [regex-lite](https://crates.io/crates/regex-lite), for GraQL's `~`.
 [rustyline](https://crates.io/crates/rustyline) is used by the shell only, and
 [criterion](https://crates.io/crates/criterion) for benchmarks only.
 

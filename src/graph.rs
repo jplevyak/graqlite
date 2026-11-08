@@ -1079,16 +1079,36 @@ impl Graph {
 
     /// The latest link of `subject predicate object` appended by `as_of` (or
     /// at all), and whether it is live.
-    fn latest_link_as_of(
+    pub(crate) fn latest_link_as_of(
         &self,
         subject: u64,
         predicate: u64,
         object: u64,
         as_of: Option<u64>,
     ) -> Option<(u64, LinkState)> {
-        let links = self.find_links(subject, predicate, object);
-        let id = *links.range(..=as_of.unwrap_or(u64::MAX)).next_back()?;
-        Some((id, self.with_link(id, |l| l.state())?))
+        self.newest_link(subject, predicate, object, as_of)
+    }
+
+    /// The latest link of `subject predicate object` appended by `as_of` (or
+    /// at all), and its state: read newest first, so usually one record.  An
+    /// id of the entry whose record is another fact's (its key's hash
+    /// collided) is passed over.
+    fn newest_link(
+        &self,
+        subject: u64,
+        predicate: u64,
+        object: u64,
+        as_of: Option<u64>,
+    ) -> Option<(u64, LinkState)> {
+        let key = tuple_index::LinkKey::Spo(subject, predicate, object);
+        tuple_index::links_newest_first(&self.local, key, as_of).find_map(|id| {
+            self.with_link(id, |l| {
+                ((l.subject(), l.predicate(), l.object()) == (subject, predicate, object))
+                    .then(|| l.state())
+            })
+            .flatten()
+            .map(|state| (id, state))
+        })
     }
 
     /// Whether `link` is the latest, live link of its fact as of `as_of` (or
@@ -1445,8 +1465,7 @@ impl Graph {
     }
 
     fn latest_link(&self, subject: u64, predicate: u64, object: u64) -> Option<(u64, LinkState)> {
-        let id = *self.find_links(subject, predicate, object).last()?;
-        Some((id, self.with_link(id, |l| l.state())?))
+        self.newest_link(subject, predicate, object, None)
     }
 
     /// The live link with this SPO.
@@ -1502,33 +1521,33 @@ impl Graph {
     /// among those appended by `as_of` (or at all, if `None`).  `links` must
     /// hold every such link of each SPO it holds.
     pub fn live(&self, links: &IdSet, as_of: Option<u64>) -> IdSet {
-        let mut latest = HashMap::new();
-        for &id in links.range(..=as_of.unwrap_or(u64::MAX)) {
+        // Newest first, the first link seen of a fact is its latest.
+        let mut seen = Facts::with_capacity(links.len());
+        let mut live = Vec::new();
+        for &id in links.range(..=as_of.unwrap_or(u64::MAX)).rev() {
             if let Some((spo, dead)) =
-                self.with_link(id, |l| ((l.subject(), l.predicate(), l.object()), l.dead()))
+                self.with_link(id, |l| ([l.subject(), l.predicate(), l.object()], l.dead()))
+                && seen.insert(spo)
+                && !dead
             {
-                latest.insert(spo, (id, dead));
+                live.push(id);
             }
         }
-        latest
-            .into_values()
-            .filter(|&(_, dead)| !dead)
-            .map(|(id, _)| id)
-            .collect()
+        live.reverse();
+        IdSet::from_sorted(live)
     }
 
     /// The non-zero ids at `linkage` (every subgraph, for `Subgraph`) of
     /// `links`.
     pub fn project(&self, links: &IdSet, linkage: Linkage) -> IdSet {
-        let mut out = IdSet::new();
+        let mut out = Vec::with_capacity(links.len());
         for &id in links {
             self.with_link(id, |l| match linkage {
                 Linkage::Subgraph => out.extend(l.subgraphs()),
-                _ => {
-                    out.insert(l.get(linkage));
-                }
+                _ => out.push(l.get(linkage)),
             });
         }
+        let mut out = IdSet::from_unsorted(out);
         out.remove(&0);
         out
     }
@@ -1637,6 +1656,51 @@ impl Readers {
 impl fmt::Debug for Readers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Readers")
+    }
+}
+
+/// The subjects, predicates and objects seen, as links are read newest
+/// first: a few, in a vector searched in order, or more, in a hash set.
+pub(crate) struct Facts {
+    few: Vec<[u64; 3]>,
+    many: Option<HashSet<[u64; 3]>>,
+}
+
+impl Facts {
+    /// The most kept in the vector.
+    const FEW: usize = 32;
+
+    /// For about `n` links.
+    pub(crate) fn with_capacity(n: usize) -> Self {
+        if n <= Self::FEW {
+            Facts {
+                few: Vec::with_capacity(n),
+                many: None,
+            }
+        } else {
+            Facts {
+                few: Vec::new(),
+                many: Some(HashSet::with_capacity(n)),
+            }
+        }
+    }
+
+    /// Adds `spo`, returning whether it is new.
+    pub(crate) fn insert(&mut self, spo: [u64; 3]) -> bool {
+        if let Some(many) = &mut self.many {
+            return many.insert(spo);
+        }
+        if self.few.contains(&spo) {
+            return false;
+        }
+        if self.few.len() == Self::FEW {
+            let mut many: HashSet<[u64; 3]> = self.few.drain(..).collect();
+            many.insert(spo);
+            self.many = Some(many);
+        } else {
+            self.few.push(spo);
+        }
+        true
     }
 }
 

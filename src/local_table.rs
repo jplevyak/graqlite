@@ -12,7 +12,7 @@
 //! key one way.  Sets are not checked for duplicates when inserting, since
 //! that would cost a lookup per insert; duplicates are dropped when reading.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::io;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
@@ -22,8 +22,186 @@ pub use crate::dynamic_table::{Error, Options, Result};
 use crate::postings::{self, Cursor, Postings, PostingsReader};
 use crate::record::Uuid;
 
-/// A set of ids, in order.
-pub type IdSet = BTreeSet<u64>;
+/// A set of ids, in order: a sorted vector of distinct ids.  Ids mostly
+/// arrive in order (index entries give them so), so adding one is a push,
+/// and a set operation a merge or a binary search; a set built from ids in
+/// any order is sorted once (see [`from_unsorted`](IdSet::from_unsorted)).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct IdSet(Vec<u64>);
+
+impl IdSet {
+    pub fn new() -> Self {
+        IdSet(Vec::new())
+    }
+
+    /// The set of `ids`, which must be increasing.
+    pub fn from_sorted(ids: Vec<u64>) -> Self {
+        debug_assert!(ids.windows(2).all(|w| w[0] < w[1]), "sorted ids");
+        IdSet(ids)
+    }
+
+    /// The set of `ids`, in any order, with repeats.
+    pub fn from_unsorted(mut ids: Vec<u64>) -> Self {
+        if !ids.windows(2).all(|w| w[0] < w[1]) {
+            ids.sort_unstable();
+            ids.dedup();
+        }
+        IdSet(ids)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The ids, increasing.
+    pub fn iter(&self) -> std::slice::Iter<'_, u64> {
+        self.0.iter()
+    }
+
+    pub fn as_slice(&self) -> &[u64] {
+        &self.0
+    }
+
+    pub fn contains(&self, id: &u64) -> bool {
+        self.0.binary_search(id).is_ok()
+    }
+
+    pub fn first(&self) -> Option<&u64> {
+        self.0.first()
+    }
+
+    pub fn last(&self) -> Option<&u64> {
+        self.0.last()
+    }
+
+    /// Adds `id`, returning whether it is new: a push, if it is the
+    /// greatest.
+    pub fn insert(&mut self, id: u64) -> bool {
+        match self.0.last() {
+            Some(&last) if last >= id => match self.0.binary_search(&id) {
+                Ok(_) => false,
+                Err(i) => {
+                    self.0.insert(i, id);
+                    true
+                }
+            },
+            _ => {
+                self.0.push(id);
+                true
+            }
+        }
+    }
+
+    /// Removes `id`, returning whether it was here.
+    pub fn remove(&mut self, id: &u64) -> bool {
+        match self.0.binary_search(id) {
+            Ok(i) => {
+                self.0.remove(i);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// The ids within `range`, increasing (or, from the back, decreasing).
+    pub fn range(&self, range: impl RangeBounds<u64>) -> std::slice::Iter<'_, u64> {
+        let lo = match range.start_bound() {
+            Bound::Included(x) => self.0.partition_point(|id| id < x),
+            Bound::Excluded(x) => self.0.partition_point(|id| id <= x),
+            Bound::Unbounded => 0,
+        };
+        let hi = match range.end_bound() {
+            Bound::Included(x) => self.0.partition_point(|id| id <= x),
+            Bound::Excluded(x) => self.0.partition_point(|id| id < x),
+            Bound::Unbounded => self.0.len(),
+        };
+        self.0[lo..hi.max(lo)].iter()
+    }
+
+    /// Keeps the ids for which `keep` holds.
+    pub fn retain(&mut self, keep: impl FnMut(&u64) -> bool) {
+        self.0.retain(keep);
+    }
+
+    /// The ids in both.
+    pub fn intersection<'a>(&'a self, other: &'a IdSet) -> impl Iterator<Item = &'a u64> + 'a {
+        let (small, large) = if self.len() <= other.len() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        small.iter().filter(move |id| large.contains(id))
+    }
+
+    /// The ids, as a vector.
+    pub fn into_vec(self) -> Vec<u64> {
+        self.0
+    }
+}
+
+impl Extend<u64> for IdSet {
+    /// Adds the ids: appended, if they follow these in order, else merged.
+    fn extend<I: IntoIterator<Item = u64>>(&mut self, ids: I) {
+        let start = self.0.len();
+        let mut sorted = true;
+        for id in ids {
+            if let Some(&last) = self.0.last() {
+                sorted &= last < id;
+            }
+            self.0.push(id);
+        }
+        if !sorted && self.0.len() > start {
+            self.0.sort_unstable();
+            self.0.dedup();
+        }
+    }
+}
+
+impl<'a> Extend<&'a u64> for IdSet {
+    fn extend<I: IntoIterator<Item = &'a u64>>(&mut self, ids: I) {
+        self.extend(ids.into_iter().copied());
+    }
+}
+
+impl FromIterator<u64> for IdSet {
+    fn from_iter<I: IntoIterator<Item = u64>>(ids: I) -> Self {
+        IdSet::from_unsorted(ids.into_iter().collect())
+    }
+}
+
+impl<'a> FromIterator<&'a u64> for IdSet {
+    fn from_iter<I: IntoIterator<Item = &'a u64>>(ids: I) -> Self {
+        ids.into_iter().copied().collect()
+    }
+}
+
+impl IntoIterator for IdSet {
+    type Item = u64;
+    type IntoIter = std::vec::IntoIter<u64>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a IdSet {
+    type Item = &'a u64;
+    type IntoIter = std::slice::Iter<'a, u64>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<const N: usize> From<[u64; N]> for IdSet {
+    fn from(ids: [u64; N]) -> Self {
+        ids.into_iter().collect()
+    }
+}
 
 /// The ids at which a key's set is promoted from its bucket to a tree in the
 /// table's postings (see [`postings`]).
@@ -116,6 +294,8 @@ impl Iterator for Ids {
 /// Lookups shared by a table and its readers.
 trait Lookups {
     fn lookup(&self, k: u64, k2: u64) -> Option<Lookup>;
+    /// The same, into `values`, returning the extra bit.
+    fn lookup_into(&self, k: u64, k2: u64, values: &mut Vec<u64>) -> Option<bool>;
     fn postings(&self) -> &dyn Trees;
 
     fn entry<K: Key>(&self, key: K) -> Entry {
@@ -153,16 +333,27 @@ trait Lookups {
         }
     }
 
+    /// Read into a buffer of the thread's, so that counting allocates
+    /// nothing; the ids are sorted only if they aren't increasing already, as
+    /// they are unless a key had ids inserted out of order or repeated.
     fn count<K: Key>(&self, key: K) -> u64 {
-        match self.entry(key) {
-            Entry::None => 0,
-            Entry::Inline(mut ids) => {
-                ids.sort_unstable();
-                ids.dedup();
-                ids.len() as u64
-            }
-            Entry::Promoted(h) => self.postings().tree(h).count(),
+        thread_local! {
+            static VALUES: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
         }
+        let (k, k2) = key.parts();
+        VALUES.with(|values| {
+            let mut fresh = Vec::new();
+            let mut held = values.try_borrow_mut();
+            let values = match &mut held {
+                Ok(v) => &mut **v,
+                Err(_) => &mut fresh,
+            };
+            match self.lookup_into(k, k2, values) {
+                None => 0,
+                Some(true) => self.postings().tree(values[0]).count(),
+                Some(false) => distinct(values),
+            }
+        })
     }
 
     fn find_one<K: Key>(&self, key: K) -> Option<u64> {
@@ -172,6 +363,16 @@ trait Lookups {
             Entry::Promoted(h) => self.postings().tree(h).iter().next(),
         }
     }
+}
+
+/// The number of distinct ids of `values`, sorting them if they aren't
+/// increasing.
+fn distinct(values: &mut Vec<u64>) -> u64 {
+    if !values.windows(2).all(|w| w[0] < w[1]) {
+        values.sort_unstable();
+        values.dedup();
+    }
+    values.len() as u64
 }
 
 /// Whether the bucket of `key` names the tree at `header`.
@@ -216,7 +417,15 @@ macro_rules! lookups {
     () => {
         /// The set at `key`, empty if there is none.
         pub fn find<K: Key>(&self, key: K) -> IdSet {
-            self.iter(key).collect()
+            match self.iter(key) {
+                // Sorted and distinct already.
+                Ids::Inline {
+                    ids,
+                    pos: 0,
+                    forward: true,
+                } => IdSet::from_sorted(ids),
+                ids => IdSet::from_sorted(ids.collect()),
+            }
         }
 
         /// The number of ids at `key`; for a large set, without reading it.
@@ -304,6 +513,10 @@ impl Lookups for LocalTable {
         self.writer.get(k, k2)
     }
 
+    fn lookup_into(&self, k: u64, k2: u64, values: &mut Vec<u64>) -> Option<bool> {
+        self.writer.get_into(k, k2, values)
+    }
+
     fn postings(&self) -> &dyn Trees {
         &self.postings
     }
@@ -342,7 +555,7 @@ impl LocalTable {
     /// holds [`PROMOTE_AT`] ids.
     pub fn insert<K: Key>(&mut self, key: K, ids: impl IntoIterator<Item = u64>) -> Result<()> {
         let (k, k2) = key.parts();
-        let ids: Vec<u64> = ids.into_iter().collect::<IdSet>().into_iter().collect();
+        let ids: Vec<u64> = ids.into_iter().collect::<IdSet>().into_vec();
         if ids.is_empty() {
             return Ok(());
         }
@@ -546,6 +759,10 @@ impl Lookups for TableReader {
         self.reader.get(k, k2)
     }
 
+    fn lookup_into(&self, k: u64, k2: u64, values: &mut Vec<u64>) -> Option<bool> {
+        self.reader.get_into(k, k2, values)
+    }
+
     fn postings(&self) -> &dyn Trees {
         &self.postings
     }
@@ -574,6 +791,13 @@ impl Lookups for TableRef<'_> {
         match self {
             TableRef::Table(t) => t.lookup(k, k2),
             TableRef::Reader(r) => r.lookup(k, k2),
+        }
+    }
+
+    fn lookup_into(&self, k: u64, k2: u64, values: &mut Vec<u64>) -> Option<bool> {
+        match self {
+            TableRef::Table(t) => t.lookup_into(k, k2, values),
+            TableRef::Reader(r) => r.lookup_into(k, k2, values),
         }
     }
 
@@ -637,6 +861,49 @@ mod tests {
 
     fn set(ids: &[u64]) -> IdSet {
         ids.iter().copied().collect()
+    }
+
+    #[test]
+    fn id_sets_are_sorted_and_distinct() {
+        let mut s = IdSet::from_unsorted(vec![9, 3, 7, 3, 1]);
+        assert_eq!(s.as_slice(), [1, 3, 7, 9]);
+        // Pushed in order, inserted out of it, or there already.
+        assert!(s.insert(12));
+        assert!(s.insert(5));
+        assert!(!s.insert(7));
+        assert_eq!(s.as_slice(), [1, 3, 5, 7, 9, 12]);
+        assert!(s.contains(&5) && !s.contains(&6));
+        assert!(s.remove(&3) && !s.remove(&3));
+        assert_eq!((s.first(), s.last()), (Some(&1), Some(&12)));
+        // Ranges of each kind of bound, either way.
+        let r = |s: &IdSet, r: (Bound<u64>, Bound<u64>)| s.range(r).copied().collect::<Vec<_>>();
+        use Bound::*;
+        assert_eq!(r(&s, (Included(5), Excluded(9))), [5, 7]);
+        assert_eq!(r(&s, (Excluded(5), Included(9))), [7, 9]);
+        assert_eq!(r(&s, (Unbounded, Included(4))), [1]);
+        assert_eq!(r(&s, (Included(13), Unbounded)), [] as [u64; 0]);
+        assert_eq!(r(&s, (Included(9), Excluded(5))), [] as [u64; 0]);
+        assert_eq!(s.range(..=9).next_back(), Some(&9));
+        // Extended in order (appended) and out of it (merged).
+        s.extend([20, 30]);
+        assert_eq!(s.as_slice(), [1, 5, 7, 9, 12, 20, 30]);
+        s.extend([2, 30, 8]);
+        assert_eq!(s.as_slice(), [1, 2, 5, 7, 8, 9, 12, 20, 30]);
+        let other = IdSet::from([2, 3, 30]);
+        assert_eq!(s.intersection(&other).copied().collect::<Vec<_>>(), [2, 30]);
+        s.retain(|&id| id % 2 == 0);
+        assert_eq!(s.into_iter().collect::<Vec<_>>(), [2, 8, 12, 20, 30]);
+    }
+
+    #[test]
+    fn counts_ids_inserted_out_of_order_once() {
+        let mut t = LocalTable::open(None, Options::default()).unwrap();
+        t.insert(7u64, [5, 3]).unwrap();
+        t.insert(7u64, [3, 9]).unwrap();
+        assert_eq!(t.count(7u64), 3);
+        assert_eq!(t.find(7u64).as_slice(), [3, 5, 9]);
+        assert_eq!(t.reader().count(7u64), 3);
+        assert_eq!(t.count(8u64), 0);
     }
 
     #[test]

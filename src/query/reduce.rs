@@ -61,20 +61,19 @@ const MAX_PAIRS: u64 = 4096;
 /// every link of each subject, predicate and object it holds; ids that are
 /// not links are skipped.
 pub(crate) fn live_links(g: &Graph, candidates: &IdSet, as_of: Option<u64>) -> Vec<Link> {
-    let mut latest: HashMap<[u64; 3], (u64, bool)> = HashMap::new();
-    for &id in candidates.range(..=as_of.unwrap_or(u64::MAX)) {
+    // Newest first, the first link seen of a fact is its latest.
+    let mut seen = crate::graph::Facts::with_capacity(candidates.len());
+    let mut live: Vec<Link> = Vec::new();
+    for &id in candidates.range(..=as_of.unwrap_or(u64::MAX)).rev() {
         let Ok(record) = g.get(id) else { continue };
         if let Some(link) = record.as_link() {
             let spo = [link.subject(), link.predicate(), link.object()];
-            latest.insert(spo, (id, link.dead()));
+            if seen.insert(spo) && !link.dead() {
+                live.push((id, spo));
+            }
         }
     }
-    let mut live: Vec<Link> = latest
-        .into_iter()
-        .filter(|&(_, (_, dead))| !dead)
-        .map(|(spo, (id, _))| (id, spo))
-        .collect();
-    live.sort_unstable();
+    live.reverse();
     live
 }
 
@@ -350,17 +349,21 @@ impl Reducer<'_> {
     /// returning those that changed.
     fn project(&mut self, i: usize) -> Vec<Var> {
         let p = self.group.patterns[i];
-        let mut values: HashMap<Var, IdSet> = HashMap::new();
+        // Collected in the links' order, then sorted once.
+        let mut found: HashMap<Var, Vec<u64>> = HashMap::new();
         for link in self.links[i].as_ref().unwrap() {
             for (term, value) in fields(&p, link) {
                 if let Some(Term::Var(v)) = term {
-                    values.entry(v).or_default().insert(value);
+                    found.entry(v).or_default().push(value);
                 }
             }
         }
         for v in p.vars() {
-            values.entry(v).or_default();
+            found.entry(v).or_default();
         }
+        let values = found
+            .into_iter()
+            .map(|(v, ids)| (v, IdSet::from_unsorted(ids)));
         let mut changed = Vec::new();
         for (v, set) in values {
             if self.narrow(v, set) {
@@ -396,7 +399,7 @@ impl Reducer<'_> {
                     }
                 }
             }
-            if self.vars.iter().flatten().any(BTreeSet::is_empty) {
+            if self.vars.iter().flatten().any(IdSet::is_empty) {
                 return true;
             }
             // Evaluate the cheapest pattern left.

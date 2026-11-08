@@ -1470,3 +1470,38 @@ fn vector_searches_are_saved_and_caught_up() {
     assert!(!file.exists());
     remove(&prefix).unwrap();
 }
+
+#[test]
+fn live_links_of_many_facts_newest_first() {
+    let mut g = Graph::open(None, Options::default()).unwrap();
+    let (s, p) = (g.node().unwrap(), g.value(b"p").unwrap());
+    let objects: Vec<u64> = (0..80)
+        .map(|i| g.value(format!("o{i}").as_bytes()).unwrap())
+        .collect();
+    let mut links = Vec::new();
+    for &o in &objects {
+        links.push(g.link(s, p, o).unwrap());
+    }
+    let before = *links.last().unwrap();
+    // Each odd one deleted, and a third of those linked again.
+    for (i, &o) in objects.iter().enumerate().filter(|(i, _)| i % 2 == 1) {
+        g.delete_link(s, p, o).unwrap();
+        if i % 3 == 0 {
+            links[i] = g.link(s, p, o).unwrap();
+        }
+    }
+    let (live, found) = g.query_property([s], Linkage::Subject, p, None).unwrap();
+    let mut want: Vec<u64> = (0..80)
+        .filter(|i| i % 2 == 0 || i % 3 == 0)
+        .map(|i| links[i])
+        .collect();
+    want.sort_unstable();
+    assert_eq!(live.as_slice(), want);
+    assert_eq!(found.len(), want.len());
+    // As of before the deletes: every fact, by its first link.
+    let (then, _) = g
+        .query_property([s], Linkage::Subject, p, Some(before))
+        .unwrap();
+    assert_eq!(then.len(), 80);
+    assert_eq!(then.last(), Some(&before));
+}
