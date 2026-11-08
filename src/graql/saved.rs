@@ -66,7 +66,7 @@ impl Saved {
         for &(link, text_id) in &saved.links {
             let text = g
                 .data(text_id)
-                .map(|d| String::from_utf8_lossy(d).into_owned())
+                .map(|d| String::from_utf8_lossy(&d).into_owned())
                 .unwrap_or_default();
             match parse_rule(&text) {
                 Ok(rule) => saved.rules.push((link, rule)),

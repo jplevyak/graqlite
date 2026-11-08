@@ -1,0 +1,29 @@
+INSERT 2
+ link | subject | predicate | object | derived
+------+---------+-----------+--------+--------------------
+ #54  | /a      | knows     | /b     |
+ #84  | /a      | knows     | /c     |
+      | /a      | friends   | 2      | count from #54 #84
+(3 rows)
+database:     in memory
+ids:          1 to 97
+history:      1 commit, 2026-10-31T12:00:00Z to 2026-10-31T12:00:00Z
+links:        5 live, 0 deleted
+predicates:   2
+rules:        0
+transaction:  none
+ephemeral:    2 computed values and nodes in memory
+ link | subject | predicate | object | derived
+------+---------+-----------+--------+--------------------
+ #54  | /a      | knows     | /b     |
+ #84  | /a      | knows     | /c     |
+      | /a      | friends   | 2      | count from #54 #84
+(3 rows)
+database:     in memory
+ids:          1 to 97
+history:      1 commit, 2026-10-31T12:00:00Z to 2026-10-31T12:00:00Z
+links:        5 live, 0 deleted
+predicates:   2
+rules:        0
+transaction:  none
+ephemeral:    2 computed values and nodes in memory

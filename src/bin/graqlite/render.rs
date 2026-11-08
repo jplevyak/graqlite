@@ -94,11 +94,12 @@ pub fn name_of(g: &Graph, id: u64, literal: bool) -> String {
         return String::new();
     }
     if let Some(key) = g.key(id)
-        && let Ok(key) = std::str::from_utf8(key)
+        && let Ok(key) = std::str::from_utf8(&key)
     {
         return key.to_string();
     }
-    match g.data(id).map(std::str::from_utf8) {
+    let data = g.data(id);
+    match data.as_deref().map(std::str::from_utf8) {
         Some(Ok(text)) if literal => graql::literal(text),
         Some(Ok(text)) => text.to_string(),
         // A node or link held in memory (see `Graph::ephemeral_node`).

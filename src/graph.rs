@@ -105,6 +105,7 @@
 //! reader made before has been dropped (see
 //! [`postings`](crate::postings#compaction)).
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -651,12 +652,17 @@ impl Graph {
         self.local.log().records(id)
     }
 
-    /// The data of the value at `id`, or of the ephemeral value (see
-    /// [`ephemeral_value`](Self::ephemeral_value)).
-    pub fn data(&self, id: u64) -> Option<&[u8]> {
+    /// The data of the value at `id`: borrowed from the log, or a copy of
+    /// an ephemeral value's (see [`ephemeral_value`](Self::ephemeral_value)).
+    pub fn data(&self, id: u64) -> Option<Cow<'_, [u8]>> {
         if id & EPHEMERAL != 0 {
-            return self.ephemeral_data(id, false);
+            return self.ephemeral_data(id, false).map(Cow::Owned);
         }
+        self.stored_data(id).map(Cow::Borrowed)
+    }
+
+    /// The data of the value at `id` in the log.
+    fn stored_data(&self, id: u64) -> Option<&[u8]> {
         match self.local.log().entry(id) {
             Ok(Entry::Value(v)) if !v.is_empty() => Some(v.as_bytes()),
             _ => None,
@@ -703,7 +709,7 @@ impl Graph {
 
     /// The value holding `data`.
     pub fn find_value(&self, data: &[u8]) -> Option<u64> {
-        tuple_index::find_value(&self.local, data).filter(|&id| self.data(id) == Some(data))
+        tuple_index::find_value(&self.local, data).filter(|&id| self.stored_data(id) == Some(data))
     }
 
     /// Links `subject` to `object` by `predicate`, now, returning the live
@@ -975,8 +981,19 @@ impl Graph {
         t.id(EphemeralKind::Key, key)
     }
 
-    /// The data of an ephemeral value, or the key of an ephemeral node.
-    fn ephemeral_data(&self, id: u64, key: bool) -> Option<&[u8]> {
+    /// The number of ephemeral values, keys and nodes the graph and its
+    /// readers hold: they are kept until the graph is dropped.
+    pub fn ephemeral_count(&self) -> usize {
+        self.ephemeral
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .data
+            .len()
+    }
+
+    /// A copy of the data of an ephemeral value, or the key of an ephemeral
+    /// node.
+    fn ephemeral_data(&self, id: u64, key: bool) -> Option<Vec<u8>> {
         let t = self.ephemeral.lock().unwrap_or_else(|e| e.into_inner());
         let (kind, data) = t.data.get((id & !EPHEMERAL) as usize)?;
         let want = if key {
@@ -984,13 +1001,7 @@ impl Graph {
         } else {
             EphemeralKind::Value
         };
-        if *kind != want {
-            return None;
-        }
-        let data: *const [u8] = &**data;
-        // SAFETY: an ephemeral entry's data is boxed, and kept (never
-        // changed or dropped) until the graph is dropped.
-        Some(unsafe { &*data })
+        (*kind == want).then(|| data.to_vec())
     }
 
     /// The entity whose key is `key`.
@@ -1002,12 +1013,14 @@ impl Graph {
         self.with_link(*links.last()?, |l| l.subject())
     }
 
-    /// The key of `id`.
-    pub fn key(&self, id: u64) -> Option<&[u8]> {
+    /// The key of `id`: borrowed from the log, or a copy of an ephemeral
+    /// node's (see [`ephemeral_key`](Self::ephemeral_key)).
+    pub fn key(&self, id: u64) -> Option<Cow<'_, [u8]>> {
         if id & EPHEMERAL != 0 {
-            return self.ephemeral_data(id, true);
+            return self.ephemeral_data(id, true).map(Cow::Owned);
         }
-        self.data(self.property(id, self.find_value(KEY_PREDICATE)?)?)
+        self.stored_data(self.property(id, self.find_value(KEY_PREDICATE)?)?)
+            .map(Cow::Borrowed)
     }
 
     /// The node whose key is `key`, appending one if there is none.

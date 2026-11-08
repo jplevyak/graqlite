@@ -698,7 +698,7 @@ fn order(g: &Graph, a: &Cell, b: &Cell) -> Option<Ordering> {
         return Some(boolean(a)?.cmp(&boolean(b)?));
     }
     let data = |c: &Cell| match c {
-        Cell::Id(id) => g.data(*id).map(<[u8]>::to_vec),
+        Cell::Id(id) => g.data(*id).map(std::borrow::Cow::into_owned),
         other => other.text(g).map(String::into_bytes),
     };
     match (data(a), data(b)) {

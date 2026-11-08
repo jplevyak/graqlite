@@ -20,7 +20,7 @@
 //! "#).unwrap();
 //! let Output::Rows { rows, .. } = &out[0] else { panic!() };
 //! assert_eq!(rows.len(), 1);
-//! assert_eq!(g.data(rows[0][1]), Some(&b"25"[..]));
+//! assert_eq!(g.data(rows[0][1]).as_deref(), Some(&b"25"[..]));
 //! ```
 //!
 //! # Statements
@@ -267,6 +267,7 @@
 //! `let … in`, `implies`, `else` after a pattern, lists, the bit operators,
 //! sequences and the other statements.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -3586,7 +3587,7 @@ impl Lowering<'_> {
                         Filter::Test(
                             v,
                             Arc::new(move |g: &Graph, id| {
-                                g.data(id).is_some_and(|d| c.holds(compare_data(d, &data)))
+                                g.data(id).is_some_and(|d| c.holds(compare_data(&d, &data)))
                             }),
                         )
                     }
@@ -4686,8 +4687,8 @@ impl Session {
         use crate::query::{ResultLink, ResultNode};
         let name = |g: &Graph, id: u64| -> String {
             match (g.key(id), g.data(id)) {
-                (Some(k), _) => format!("key {}", String::from_utf8_lossy(k)),
-                (_, Some(d)) => format!("value {}", String::from_utf8_lossy(d)),
+                (Some(k), _) => format!("key {}", String::from_utf8_lossy(&k)),
+                (_, Some(d)) => format!("value {}", String::from_utf8_lossy(&d)),
                 _ => format!("#{id}"),
             }
         };
@@ -5248,8 +5249,8 @@ impl Session {
                                     match row[v] {
                                         0 => None,
                                         id if id & graph::EPHEMERAL != 0 => {
-                                            let data = g.data(id).map(<[u8]>::to_vec);
-                                            let key = g.key(id).map(<[u8]>::to_vec);
+                                            let data = g.data(id).map(Cow::into_owned);
+                                            let key = g.key(id).map(Cow::into_owned);
                                             match (data, key) {
                                                 (Some(d), _) if insert => Some(g.value(&d)?),
                                                 (_, Some(k)) if insert => {

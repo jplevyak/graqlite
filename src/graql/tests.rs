@@ -28,7 +28,9 @@ fn data(g: &Graph, rows: &[Vec<u64>]) -> Vec<Vec<String>> {
     rows.iter()
         .map(|r| {
             r.iter()
-                .map(|&id| String::from_utf8(g.data(id).unwrap_or(b"-").to_vec()).unwrap())
+                .map(|&id| {
+                    String::from_utf8(g.data(id).as_deref().unwrap_or(b"-").to_vec()).unwrap()
+                })
                 .collect()
         })
         .collect()
@@ -1379,7 +1381,7 @@ fn table(g: &Graph, out: &Output) -> Vec<Vec<String>> {
                     &Cell::Id(id) => g
                         .key(id)
                         .or_else(|| g.data(id))
-                        .map(|d| String::from_utf8_lossy(d).into_owned())
+                        .map(|d| String::from_utf8_lossy(&d).into_owned())
                         .unwrap_or_else(|| format!("#{id}")),
                     other => other.to_string(),
                 })
@@ -1631,7 +1633,8 @@ fn parameters() {
     s.execute_with(&mut g, "insert $who name $name", &p)
         .unwrap();
     assert_eq!(
-        g.data(g.property(ann, g.find_value(b"name").unwrap()).unwrap()),
+        g.data(g.property(ann, g.find_value(b"name").unwrap()).unwrap())
+            .as_deref(),
         Some(&b"Ann A"[..])
     );
     let out = s
@@ -1676,7 +1679,7 @@ fn ids_and_offset() {
     let data = |g: &Graph, out: &Output| -> Vec<String> {
         rows(out)
             .iter()
-            .map(|r| String::from_utf8_lossy(g.data(r[0]).unwrap()).into_owned())
+            .map(|r| String::from_utf8_lossy(&g.data(r[0]).unwrap()).into_owned())
             .collect()
     };
     let out = one(&mut g, "select ?v by ?v where /a n ?v");
@@ -2609,7 +2612,8 @@ fn graphs_and_symbols() {
             .map(|r| {
                 r.iter()
                     .map(|&id| {
-                        let text = g.key(id).or_else(|| g.data(id)).unwrap_or(b"?");
+                        let text = g.key(id).or_else(|| g.data(id));
+                        let text = text.as_deref().unwrap_or(b"?");
                         String::from_utf8(text.to_vec()).unwrap()
                     })
                     .collect()
@@ -2804,7 +2808,8 @@ fn the_rest_of_the_tour() {
                 .map(|r| {
                     r.iter()
                         .map(|&id| {
-                            let t = g.key(id).or_else(|| g.data(id)).unwrap_or(b"?");
+                            let t = g.key(id).or_else(|| g.data(id));
+                            let t = t.as_deref().unwrap_or(b"?");
                             String::from_utf8(t.to_vec()).unwrap()
                         })
                         .collect()

@@ -684,6 +684,15 @@ impl Shell {
             )
             .map_err(|e| e.to_string())?;
         }
+        // What queries computed, held in memory until the database closes.
+        let ephemeral = self.g.ephemeral_count();
+        if ephemeral > 0 {
+            writeln!(
+                self.out,
+                "ephemeral:    {ephemeral} computed values and nodes in memory"
+            )
+            .map_err(|e| e.to_string())?;
+        }
         let mut namer = Namer::new(&self.g, self.style);
         if let Some(a) = self.session.author() {
             writeln!(self.out, "author:       {}", namer.name(a)).map_err(|e| e.to_string())?;
@@ -784,7 +793,10 @@ impl Shell {
         } else if record.is_value() {
             text.push_str(&format!("#{id} value {}\n", name_of(&self.g, id, true)));
         } else {
-            let key = self.g.key(id).map(String::from_utf8_lossy);
+            let key = self
+                .g
+                .key(id)
+                .map(|k| String::from_utf8_lossy(&k).into_owned());
             match key {
                 Some(k) => text.push_str(&format!("#{id} node {k}\n")),
                 None => text.push_str(&format!("#{id} node\n")),

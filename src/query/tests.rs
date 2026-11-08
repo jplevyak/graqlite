@@ -1027,7 +1027,7 @@ fn constants_links_and_filters() {
     let (x, v) = (q.var("x"), q.var("v"));
     let adult: Test = Arc::new(|g: &Graph, id| {
         g.data(id)
-            .and_then(|d| std::str::from_utf8(d).ok()?.parse::<u32>().ok())
+            .and_then(|d| std::str::from_utf8(&d).ok()?.parse::<u32>().ok())
             .is_some_and(|n| n >= 18)
     });
     q.pattern(x, age, v)
@@ -1113,7 +1113,10 @@ fn unions() {
     by_nick.pattern(x, nick, n);
     q.union([by_name, by_nick]).order_by(SortKey::data(n));
     let rows = q.run(&g).unwrap();
-    let data: Vec<&[u8]> = rows.iter().map(|r| g.data(r[1]).unwrap()).collect();
+    let data: Vec<Vec<u8>> = rows
+        .iter()
+        .map(|r| g.data(r[1]).unwrap().into_owned())
+        .collect();
     assert_eq!(
         data,
         [

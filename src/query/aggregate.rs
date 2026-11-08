@@ -6,6 +6,7 @@
 //! id 0 is unbound (from an optional group), which aggregates skip, except
 //! `count(*)`.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -64,7 +65,7 @@ impl Cell {
         match self {
             Cell::Int(n) => Some(Number::Int(*n)),
             Cell::Float(x) => Some(Number::Float(*x)),
-            Cell::Id(id) => parse_number(std::str::from_utf8(g.data(*id)?).ok()?),
+            Cell::Id(id) => parse_number(std::str::from_utf8(&g.data(*id)?).ok()?),
             Cell::Text(t) => parse_number(t),
             Cell::Bool(_) | Cell::Unbound => None,
         }
@@ -78,7 +79,7 @@ impl Cell {
             Cell::Id(id) => g
                 .data(*id)
                 .or_else(|| g.key(*id))
-                .map(|d| String::from_utf8_lossy(d).into_owned()),
+                .map(|d| String::from_utf8_lossy(&d).into_owned()),
             Cell::Int(n) => Some(n.to_string()),
             Cell::Float(x) => Some(format_float(*x)),
             Cell::Text(t) => Some(t.clone()),
@@ -120,17 +121,18 @@ pub fn format_float(x: f64) -> String {
 /// links), by id.
 pub fn compare_cells(g: &Graph, a: &Cell, b: &Cell) -> Ordering {
     /// A cell's rank, its number, its bytes, and its id.
-    fn key<'a>(g: &'a Graph, c: &'a Cell) -> (u8, f64, &'a [u8], u64) {
+    fn key<'a>(g: &'a Graph, c: &'a Cell) -> (u8, f64, Cow<'a, [u8]>, u64) {
+        let none = || Cow::Borrowed(&[][..]);
         if let Some(n) = c.number(g) {
-            return (1, n, &[], 0);
+            return (1, n, none(), 0);
         }
         match c {
-            Cell::Unbound => (0, 0.0, &[], 0),
-            Cell::Bool(b) => (2, f64::from(u8::from(*b)), &[], 0),
-            Cell::Text(t) => (3, 0.0, t.as_bytes(), 0),
+            Cell::Unbound => (0, 0.0, none(), 0),
+            Cell::Bool(b) => (2, f64::from(u8::from(*b)), none(), 0),
+            Cell::Text(t) => (3, 0.0, Cow::Borrowed(t.as_bytes()), 0),
             Cell::Id(id) => match g.data(*id) {
                 Some(d) => (3, 0.0, d, 0),
-                None => (4, 0.0, &[], *id),
+                None => (4, 0.0, none(), *id),
             },
             Cell::Int(_) | Cell::Float(_) => unreachable!("numbers"),
         }
@@ -138,7 +140,7 @@ pub fn compare_cells(g: &Graph, a: &Cell, b: &Cell) -> Ordering {
     let (ka, kb) = (key(g, a), key(g, b));
     ka.0.cmp(&kb.0)
         .then(ka.1.total_cmp(&kb.1))
-        .then(ka.2.cmp(kb.2))
+        .then(ka.2.cmp(&kb.2))
         .then(ka.3.cmp(&kb.3))
 }
 

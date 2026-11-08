@@ -2447,10 +2447,10 @@ type BySubject<'t> = HashMap<(u64, u64), Vec<&'t Vec<u64>>>;
 fn result_node(g: &Graph, id: u64) -> ResultNode {
     if id & EPHEMERAL != 0 {
         if let Some(d) = g.data(id) {
-            return ResultNode::Value(Cell::Text(String::from_utf8_lossy(d).into_owned()));
+            return ResultNode::Value(Cell::Text(String::from_utf8_lossy(&d).into_owned()));
         }
         if let Some(k) = g.key(id) {
-            return ResultNode::Key(String::from_utf8_lossy(k).into_owned());
+            return ResultNode::Key(String::from_utf8_lossy(&k).into_owned());
         }
     }
     ResultNode::Entry(id)

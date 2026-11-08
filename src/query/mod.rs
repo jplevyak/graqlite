@@ -396,7 +396,7 @@ impl Filter {
             Filter::Ne(a, b) => id(a) != id(b),
             Filter::Lt(a, b) => id(a) < id(b),
             Filter::Compare(a, c, b) => match (g.data(id(a)), g.data(id(b))) {
-                (Some(x), Some(y)) => c.holds(compare_data(x, y)),
+                (Some(x), Some(y)) => c.holds(compare_data(&x, &y)),
                 _ => false,
             },
             Filter::Test(v, test) => test(g, row[v.0]),

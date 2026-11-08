@@ -40,9 +40,30 @@ entries in `\info` would show how fast real sessions grow.
 
 ## Tasks
 
-- [ ] `ephemeral_data` returns owned data; remove the unsafe lifetime
+- [x] `ephemeral_data` returns owned data; remove the unsafe lifetime
       extension
-- [ ] Count ephemeral entries in `\info`
+- [x] Count ephemeral entries in `\info`
 - [ ] Per-query (and per-overlay) arenas for computed values
 - [ ] A test: a loop of aggregate queries on an open graph does not grow
       its ephemeral table
+
+## Progress
+
+Part 1 is done:
+
+- **`Graph::data` and `Graph::key` return `Option<Cow<'_, [u8]>>`:**
+  borrowed from the log for the graph's own entries, as before, and a
+  copy for an ephemeral one. The `unsafe` lifetime extension is gone, so
+  nothing stops an entry being dropped any more. This is an API change:
+  callers comparing with a slice use `.as_deref()`, and those keeping the
+  data use `into_owned`. The copy is made under the table's lock and is
+  small: computed values are numbers, keys and short text.
+- **`Graph::ephemeral_count`** gives the entries held, by the graph and
+  its readers together. `\info` prints it, as `ephemeral: N computed
+  values and nodes in memory`, when there are any; `tests/cli/ephemeral.graql`
+  shows a repeated query finding the same entries, not adding more.
+
+Next is part 2, the per-query and per-overlay arenas. The count shows
+that a repeated query doesn't grow the table. Distinct results do: each
+new count or rank adds one entry, and each overlay node or link one.
+

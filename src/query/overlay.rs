@@ -415,10 +415,12 @@ fn real(g: &mut Graph, id: u64, nodes: &mut HashMap<u64, u64>) -> Result<u64> {
     if id & EPHEMERAL == 0 {
         return Ok(id);
     }
-    if let Some(d) = g.data(id).map(<[u8]>::to_vec) {
+    if let Some(d) = g.data(id) {
+        let d = d.into_owned();
         return g.value(&d);
     }
-    if let Some(k) = g.key(id).map(<[u8]>::to_vec) {
+    if let Some(k) = g.key(id) {
+        let k = k.into_owned();
         return g.node_by_key(&k);
     }
     if let Some(&n) = nodes.get(&id) {

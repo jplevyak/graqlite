@@ -44,7 +44,7 @@ fn value_interning() {
     assert_eq!(g.value(b"alice").unwrap(), a);
     assert_eq!(g.find_value(b"bob"), Some(b));
     assert_eq!(g.find_value(b"carol"), None);
-    assert_eq!(g.data(a), Some(&b"alice"[..]));
+    assert_eq!(g.data(a).as_deref(), Some(&b"alice"[..]));
     // Empty data is a node, and nodes are not interned.
     let n = g.value(b"").unwrap();
     assert!(g.get(n).unwrap().is_node());
@@ -373,7 +373,7 @@ fn keys() {
     let alice = g.node_by_key(b"alice").unwrap();
     assert_eq!(g.node_by_key(b"alice").unwrap(), alice);
     assert_eq!(g.find_by_key(b"alice"), Some(alice));
-    assert_eq!(g.key(alice), Some(&b"alice"[..]));
+    assert_eq!(g.key(alice).as_deref(), Some(&b"alice"[..]));
     assert!(matches!(g.node_by_key(b""), Err(Error::InvalidArgument(_))));
 
     let bob = g.node_by_key(b"bob").unwrap();
@@ -383,7 +383,7 @@ fn keys() {
 
     // Renaming frees the old key.
     g.set_key(alice, b"alicia").unwrap();
-    assert_eq!(g.key(alice), Some(&b"alicia"[..]));
+    assert_eq!(g.key(alice).as_deref(), Some(&b"alicia"[..]));
     assert_eq!(g.find_by_key(b"alice"), None);
     assert_eq!(g.find_by_key(b"alicia"), Some(alice));
     g.set_key(bob, b"alice").unwrap();
@@ -1109,20 +1109,32 @@ fn ephemeral_values_and_keys() {
     assert_eq!(g.ephemeral_key(b"/b"), b);
     // A value and a key of the same text are different.
     assert_ne!(g.ephemeral_key(b"6"), six);
-    assert_eq!(g.data(six), Some(&b"6"[..]));
+    assert_eq!(g.data(six).as_deref(), Some(&b"6"[..]));
     assert_eq!(g.key(six), None);
-    assert_eq!(g.key(b), Some(&b"/b"[..]));
+    assert_eq!(g.key(b).as_deref(), Some(&b"/b"[..]));
     assert_eq!(g.data(b), None);
     assert_eq!(g.data(EPHEMERAL | 1000), None);
     // They aren't entries, and can't be written.
     assert!(g.find_value(b"6").is_none());
     assert!(g.link(node, five, six).is_err());
-    // Read back while others are added.
+    // Read back while others are added: a copy, owned.
     let data = g.data(six).unwrap();
+    assert!(matches!(data, std::borrow::Cow::Owned(_)));
+    let held = g.ephemeral_count();
+    assert_eq!(held, 3);
     for i in 0..100 {
         g.ephemeral_value(format!("x{i}").as_bytes());
     }
-    assert_eq!(data, b"6");
+    assert_eq!(&*data, b"6");
+    // Counted, with a reader's, which shares them.
+    let r = g.reader();
+    r.ephemeral_value(b"7");
+    assert_eq!(g.ephemeral_count(), held + 101);
+    // The graph's own data is borrowed.
+    assert!(matches!(
+        g.data(five),
+        Some(std::borrow::Cow::Borrowed(b"5"))
+    ));
 }
 
 /// A graph can be shared between threads: queries read `&Graph`.

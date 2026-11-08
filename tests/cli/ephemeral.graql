@@ -1,0 +1,8 @@
+-- Values a query computes that the database doesn't have are held in
+-- memory, and \info counts them: here the count 2 and the key friends.
+-- Running the query again finds the same ones.
+insert /a knows /b . /a knows /c
+lookup ?s knows ?x . COUNT(?s friends ?x)
+\info
+lookup ?s knows ?x . COUNT(?s friends ?x)
+\info
