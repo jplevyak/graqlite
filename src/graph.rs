@@ -98,10 +98,10 @@
 //! commit, which the writer publishes at each one from then on.
 //!
 //! A reader can't see an index level the writer has retired: a lookup
-//! re-reads the current level, and a retired one is unmapped only
-//! [`retire_delay`](crate::dynamic_table::Options::retire_delay) after (5
-//! minutes, by default), longer than any one lookup.  The pages of large
-//! index entries are never reclaimed, and compaction builds new ones.
+//! re-reads the current level, and one still on a retired level holds it
+//! until it returns, when it is unmapped (see
+//! [`dynamic_table`](crate::dynamic_table)).  The pages of large index
+//! entries are never reclaimed, and compaction builds new ones.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;

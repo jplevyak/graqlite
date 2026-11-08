@@ -123,27 +123,6 @@ impl Mapping {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.add(offset as usize), len as usize) }
     }
 
-    /// Replaces the mapping with inaccessible memory at the same address.  The
-    /// file's pages are released, and any later access faults rather than
-    /// reading memory that was reused for something else.
-    pub fn make_inaccessible(&self) -> io::Result<()> {
-        // SAFETY: replaces exactly this mapping's range.
-        let ptr = unsafe {
-            libc::mmap(
-                self.ptr.cast(),
-                self.len,
-                libc::PROT_NONE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED | libc::MAP_NORESERVE,
-                -1,
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
     /// Flushes the first `len` bytes to the file.
     pub fn sync(&self, len: u64) -> io::Result<()> {
         // SAFETY: the range lies within this mapping.

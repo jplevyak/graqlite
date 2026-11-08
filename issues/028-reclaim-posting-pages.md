@@ -1,6 +1,6 @@
 # Reclaim the pages of compacted posting trees
 
-**Status:** open · **Size:** medium · **Related:** [011](closed/011-adaptive-btree-index-entries.md) (compaction builds new trees), [018](closed/018-snapshot-readers.md) (snapshots say when readers are gone), [024](024-reader-reclamation-without-a-timer.md)
+**Status:** open · **Size:** medium · **Related:** [011](closed/011-adaptive-btree-index-entries.md) (compaction builds new trees), [018](closed/018-snapshot-readers.md) (snapshots say when readers are gone), [024](closed/024-reader-reclamation-without-a-timer.md)
 
 ## Problem
 

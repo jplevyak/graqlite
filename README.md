@@ -487,8 +487,9 @@ many buckets as the one before. A key's operations are appended to its bucket
 as compact varint records, and each bucket links to an overflow bucket when it
 fills. When too many buckets overflow, the table moves to the next level a few
 buckets at a time. Each level is mapped at a fixed address with room reserved to
-grow, so growing never moves memory that readers are using. An old level is
-unmapped `Options::retire_delay` after the move finishes (5 minutes by default).
+grow, so growing never moves memory that readers are using. Each lookup holds
+the level it reads, so an old level is unmapped when the last lookup on it
+returns, and its file is deleted at the next sync.
 
 It runs on 64-bit Unix only, and one process at a time; a lock file stops a second
 writer.

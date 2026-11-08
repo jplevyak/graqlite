@@ -407,10 +407,10 @@ fn interrupted_expansion_resumes() {
     let (from, to) = (shared.level(l).unwrap(), shared.level(l + 1).unwrap());
     let b = w.meta.get(l, Field::ExpandedBuckets);
     // Bucket b: copied, then a crash before it was marked.
-    w.copy_bucket(from, to, b).unwrap();
+    w.copy_bucket(&from, &to, b).unwrap();
     // Bucket b + 1: copied and marked, then a crash before the count was saved.
-    w.copy_bucket(from, to, b + 1).unwrap();
-    w.set_header(from, b + 1, HEADER_EXTENDED);
+    w.copy_bucket(&from, &to, b + 1).unwrap();
+    w.set_header(&from, b + 1, HEADER_EXTENDED);
 
     while w.is_expanding() {
         w.tick().unwrap();
@@ -419,29 +419,89 @@ fn interrupted_expansion_resumes() {
     check_all(&w.reader(), &records);
 }
 
+/// Inserts random records into `w` until its current level is past `start`,
+/// adding them to `records`.
+fn expand_past(w: &mut Writer, start: usize, rng: &mut XorShift, records: &mut Records) {
+    while level(w) <= start {
+        let batch = random_records(rng, 50, records);
+        insert_all(w, &batch);
+        records.extend(batch);
+    }
+}
+
 #[test]
 fn retired_level_is_unmapped_and_deleted() {
     let dir = TempDir::new("retire");
     let prefix = dir.prefix("t");
-    let options = Options {
-        retire_delay: Duration::ZERO,
-        ..Options::default()
-    };
-    let mut w = Writer::open(Some(&prefix), options).unwrap();
+    let mut w = Writer::open(Some(&prefix), Options::default()).unwrap();
+    let old = Arc::downgrade(&w.shared.level(0).unwrap());
     let mut rng = XorShift(8);
     let mut records = Records::new();
-    while level(&w) == 0 {
-        let batch = random_records(&mut rng, 50, &records);
-        insert_all(&mut w, &batch);
-        records.extend(batch);
-    }
+    expand_past(&mut w, 0, &mut rng, &mut records);
     assert!(w.shared.level(0).is_none(), "new lookups skip level 0");
     assert!(
-        level_path(&prefix, 0).exists(),
-        "kept until the delay passes"
+        old.upgrade().is_none(),
+        "with no lookup on it, unmapped at once"
     );
-    w.tick().unwrap();
+    assert!(
+        level_path(&prefix, 0).exists(),
+        "its file is kept until the metadata saying it was expanded is synced"
+    );
+    w.sync().unwrap();
     assert!(!level_path(&prefix, 0).exists());
+    check_all(&w.reader(), &records);
+
+    // A level retired but not yet synced: the next open deletes its file.
+    expand_past(&mut w, 1, &mut rng, &mut records);
+    assert!(level_path(&prefix, 1).exists());
+    drop(w);
+    let w = Writer::open(Some(&prefix), Options::default()).unwrap();
+    assert_eq!(level(&w), 2);
+    assert!(!level_path(&prefix, 1).exists());
+    check_all(&w.reader(), &records);
+}
+
+#[test]
+fn a_paused_lookup_keeps_its_level_through_retirement() {
+    use std::sync::Mutex;
+    use std::sync::mpsc;
+
+    let mut w = memory_table();
+    let mut rng = XorShift(9);
+    let mut records = random_records(&mut rng, 50, &Records::new());
+    insert_all(&mut w, &records);
+    let (&(key, key2), (bit, values)) = records.iter().next().unwrap();
+    let expected = found(*bit, values);
+    let start = level(&w);
+    let old = Arc::downgrade(&w.shared.level(start).unwrap());
+
+    // The first lookup stops while it holds the level, until told to go on.
+    let (inside, is_inside) = mpsc::channel();
+    let (go, wait) = mpsc::channel::<()>();
+    let wait = Mutex::new(wait);
+    let first = AtomicBool::new(true);
+    *w.shared.pause.lock().unwrap() = Some(Arc::new(move || {
+        if first.swap(false, Ordering::SeqCst) {
+            inside.send(()).unwrap();
+            wait.lock().unwrap().recv().unwrap();
+        }
+    }));
+    let reader = w.reader();
+    let lookup = std::thread::spawn(move || reader.get(key, key2));
+    is_inside.recv().unwrap();
+
+    // Expansion finishes and retires the level the lookup is on.
+    expand_past(&mut w, start, &mut rng, &mut records);
+    assert!(w.shared.level(start).is_none(), "retired");
+    assert!(
+        old.upgrade().is_some(),
+        "still mapped for the paused lookup"
+    );
+
+    go.send(()).unwrap();
+    assert_eq!(lookup.join().unwrap(), expected);
+    assert!(old.upgrade().is_none(), "unmapped when the lookup returned");
+    *w.shared.pause.lock().unwrap() = None;
     check_all(&w.reader(), &records);
 }
 

@@ -12,6 +12,7 @@ categories = ["database-implementations", "data-structures", "command-line-utili
 exclude = ["/target", "/issues"]
 
 [dependencies]
+arc-swap = "1.9.4"
 libc = "0.2.191"
 regex-lite = "0.1.9"
 rustyline = { version = "19.0.0", optional = true }

@@ -24,10 +24,12 @@
 //! bucket word by word and ignore any record that is incomplete.
 //!
 //! Each level's file is mapped at a fixed address with room reserved for it to
-//! grow, so growing a file never moves its mapping.  When expansion finishes,
-//! the old level is unmapped after [`Options::retire_delay`]; a reader still in
-//! the middle of a lookup on it after that long faults rather than reading
-//! garbage.
+//! grow, so growing a file never moves its mapping.  A lookup holds a
+//! reference to each level it reads, so when expansion finishes the writer
+//! drops its own and new lookups start at the next level, and the old level is
+//! unmapped when the last lookup on it returns, however long that takes.  Its
+//! file is deleted at the next [`sync`](Writer::sync), once the metadata saying
+//! it was fully expanded is on disk.
 //!
 //! # Crash behavior
 //!
@@ -41,15 +43,15 @@ mod record;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use arc_swap::ArcSwapOption;
 
 use crate::mmap::{self, Mapping, round_up_to_page, suffixed};
 use record::{BUCKET_BYTES, BUCKET_HEADER_BYTES, KeyState, Kind, MAX_RECORD_BYTES};
@@ -128,9 +130,6 @@ pub struct Options {
     /// The least address space reserved for each level.  A level reserves at
     /// least twice its base size, leaving as much room again for overflow.
     pub min_level_reserve: u64,
-    /// How long after an expansion finishes the old level stays mapped for
-    /// readers still using it.
-    pub retire_delay: Duration,
 }
 
 impl Default for Options {
@@ -138,7 +137,6 @@ impl Default for Options {
         Options {
             create_size: 0,
             min_level_reserve: 256 << 20,
-            retire_delay: Duration::from_secs(300),
         }
     }
 }
@@ -186,7 +184,8 @@ pub fn remove(prefix: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// One mapped level.
+/// One mapped level, unmapped when dropped: when the writer has retired it
+/// and the last lookup on it has returned.
 struct Level {
     index: usize,
     base_buckets: u64,
@@ -238,19 +237,18 @@ impl Level {
 struct Shared {
     /// The current level, where lookups start.
     level: AtomicUsize,
-    /// The mapped levels, null once retired.
-    levels: [AtomicPtr<Level>; MAX_LEVELS],
-    /// Owns every level ever mapped, so `levels` never dangles.  Boxed so a
-    /// level stays put when the vector grows.
-    #[allow(clippy::vec_box)]
-    owned: Mutex<Vec<Box<Level>>>,
+    /// The mapped levels, `None` once retired.  A lookup holds the level it
+    /// reads (an `arc-swap` guard: no more than an atomic increment and
+    /// decrement, unless the level is retired meanwhile).
+    levels: [ArcSwapOption<Level>; MAX_LEVELS],
+    /// For tests: called by each lookup while it holds a level.
+    #[cfg(test)]
+    pause: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Shared {
-    fn level(&self, i: usize) -> Option<&Level> {
-        let p = self.levels.get(i)?.load(Ordering::Acquire);
-        // SAFETY: non-null pointers point into `owned`, which outlives `self`.
-        unsafe { p.as_ref() }
+    fn level(&self, i: usize) -> Option<Arc<Level>> {
+        self.levels.get(i)?.load_full()
     }
 
     fn lookup(&self, key: u64, key2: u64, values: &mut Vec<u64>) -> Option<bool> {
@@ -258,7 +256,8 @@ impl Shared {
         let mut level = self.level.load(Ordering::Acquire);
         'restart: loop {
             values.clear();
-            let Some(lvl) = self.level(level) else {
+            let guard = self.levels.get(level).map(|l| l.load());
+            let Some(lvl) = guard.as_ref().and_then(|g| g.as_deref()) else {
                 // The level was retired: start over at the current level.
                 let current = self.level.load(Ordering::Acquire);
                 if current == level {
@@ -267,6 +266,13 @@ impl Shared {
                 level = current;
                 continue;
             };
+            #[cfg(test)]
+            {
+                let pause = self.pause.lock().unwrap().clone();
+                if let Some(pause) = pause {
+                    pause();
+                }
+            }
             let mut bit = false;
             let mut b = lvl.base_bucket(h);
             let mut head = true;
@@ -381,8 +387,9 @@ pub struct Writer {
     prefix: Option<PathBuf>,
     options: Options,
     inserts: u64,
-    /// Levels whose expansion finished, and when.
-    retiring: VecDeque<(usize, Instant)>,
+    /// Levels retired since the last sync, whose files it deletes once the
+    /// metadata saying they were fully expanded is on disk.
+    retired: Vec<usize>,
     /// For tests: called before each word of a record is stored, and returning
     /// true abandons the rest of the record, as if the writer crashed.
     fault: Option<Box<dyn FnMut() -> bool + Send + Sync>>,
@@ -429,8 +436,9 @@ impl Writer {
 
         let shared = Arc::new(Shared {
             level: AtomicUsize::new(0),
-            levels: std::array::from_fn(|_| AtomicPtr::new(ptr::null_mut())),
-            owned: Mutex::new(Vec::new()),
+            levels: std::array::from_fn(|_| ArcSwapOption::empty()),
+            #[cfg(test)]
+            pause: std::sync::Mutex::new(None),
         });
         let mut files: Vec<Option<File>> = (0..MAX_LEVELS).map(|_| None).collect();
         for (l, file) in level_files {
@@ -444,7 +452,7 @@ impl Writer {
             prefix: prefix.map(Path::to_path_buf),
             options,
             inserts: 0,
-            retiring: VecDeque::new(),
+            retired: Vec::new(),
             fault: None,
         };
         let current = match current_level(|l, f| writer.meta.get(l, f)) {
@@ -511,31 +519,27 @@ impl Writer {
             .map(|_| ())
     }
 
-    /// Does periodic maintenance: an expansion step if one is in progress, and
-    /// unmapping and deleting levels whose retire delay has passed.
+    /// Does periodic maintenance: an expansion step if one is in progress.
     pub fn tick(&mut self) -> Result<()> {
         if self.is_expanding() {
             self.expand_step()?;
         }
-        let now = Instant::now();
-        while let Some(&(level, at)) = self.retiring.front() {
-            if now.duration_since(at) < self.options.retire_delay {
-                break;
-            }
-            self.retiring.pop_front();
-            self.retire(level)?;
-        }
         Ok(())
     }
 
-    /// Flushes the table, and the directory holding its files, to disk.
-    pub fn sync(&self) -> Result<()> {
+    /// Flushes the table, and the directory holding its files, to disk; then
+    /// deletes the files of the levels retired since the last sync.
+    pub fn sync(&mut self) -> Result<()> {
         for lvl in self.live_levels() {
             lvl.map.sync(lvl.allocated.load(Ordering::Relaxed))?;
         }
         self.meta.map.sync(METADATA_SIZE)?;
         if let Some(p) = &self.prefix {
             mmap::sync_dir(p)?;
+        }
+        // A crash before this leaves files that the next open deletes.
+        for l in std::mem::take(&mut self.retired) {
+            self.remove_level_file(l)?;
         }
         Ok(())
     }
@@ -628,7 +632,7 @@ impl Writer {
         result
     }
 
-    fn live_levels(&self) -> impl Iterator<Item = &Level> {
+    fn live_levels(&self) -> impl Iterator<Item = Arc<Level>> + use<'_> {
         let current = self.shared.level.load(Ordering::Relaxed);
         [current, current + 1]
             .into_iter()
@@ -637,7 +641,10 @@ impl Writer {
 
     fn is_expanding(&self) -> bool {
         let current = self.shared.level.load(Ordering::Relaxed);
-        self.shared.level(current + 1).is_some()
+        self.shared
+            .levels
+            .get(current + 1)
+            .is_some_and(|l| l.load().is_some())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -675,7 +682,7 @@ impl Writer {
             level += 1;
         };
         let inserted = self.append(
-            lvl,
+            &lvl,
             lvl.base_bucket(h),
             kind,
             key,
@@ -849,16 +856,14 @@ impl Writer {
                 .max(self.options.min_level_reserve)
                 .max(size),
         );
-        let level = Box::new(Level {
+        let level = Arc::new(Level {
             index: l,
             base_buckets: base,
             map: Mapping::new(&file, reserve)?,
             allocated: AtomicU64::new(size),
         });
         self.meta.set(l, Field::FileSize, size);
-        let ptr = &*level as *const Level as *mut Level;
-        self.shared.owned.lock().unwrap().push(level);
-        self.shared.levels[l].store(ptr, Ordering::Release);
+        self.shared.levels[l].store(Some(level));
         self.files[l] = Some(file);
         Ok(())
     }
@@ -897,15 +902,18 @@ impl Writer {
             }
             // If it is already marked, a crash came before the count was saved.
             if from.header(b) != HEADER_EXTENDED {
-                self.copy_bucket(from, to, b)?;
-                self.set_header(from, b, HEADER_EXTENDED);
+                self.copy_bucket(&from, &to, b)?;
+                self.set_header(&from, b, HEADER_EXTENDED);
             }
             self.meta.set(l, Field::ExpandedBuckets, b + 1);
         }
         if self.meta.get(l, Field::ExpandedBuckets) >= from.base_buckets {
+            // Retired: new lookups start at the next level, and lookups still
+            // on this one hold it until they return.
             self.shared.level.store(l + 1, Ordering::Release);
-            self.shared.levels[l].store(ptr::null_mut(), Ordering::Release);
-            self.retiring.push_back((l, Instant::now()));
+            self.shared.levels[l].store(None);
+            self.files[l] = None;
+            self.retired.push(l);
         }
         Ok(())
     }
@@ -956,17 +964,6 @@ impl Writer {
             }
         }
         Ok(())
-    }
-
-    /// Unmaps a fully expanded level and deletes its file.
-    fn retire(&mut self, l: usize) -> Result<()> {
-        let owned = self.shared.owned.lock().unwrap();
-        if let Some(lvl) = owned.iter().find(|lvl| lvl.index == l) {
-            lvl.map.make_inaccessible()?;
-        }
-        drop(owned);
-        self.files[l] = None;
-        self.remove_level_file(l)
     }
 
     fn remove_level_file(&self, l: usize) -> Result<()> {
