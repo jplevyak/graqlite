@@ -174,6 +174,11 @@ trait Lookups {
     }
 }
 
+/// Whether the bucket of `key` names the tree at `header`.
+fn names(writer: &Writer, header: u64, (k, k2): (u64, u64)) -> bool {
+    matches!(entry(writer.get(k, k2)), Entry::Promoted(h) if h == header)
+}
+
 /// Where a table's trees are read.
 trait Trees {
     fn tree(&self, header: u64) -> postings::Tree;
@@ -308,11 +313,21 @@ impl LocalTable {
     /// Opens or creates the table whose files start with `prefix`, or an
     /// in-memory table if `prefix` is `None`.
     pub fn open(prefix: Option<&Path>, options: Options) -> Result<Self> {
-        Ok(LocalTable {
+        let mut t = LocalTable {
             writer: Writer::open(prefix, options)?,
             postings: Postings::open(prefix)?,
             promoted: HashMap::new(),
-        })
+        };
+        t.reclaim_unnamed();
+        Ok(t)
+    }
+
+    /// Frees the pages of every tree no bucket names: left by compaction,
+    /// by keys set or deleted, or by a crash during promotion.
+    fn reclaim_unnamed(&mut self) {
+        let writer = &self.writer;
+        self.postings
+            .reclaim_unnamed(|h, key| names(writer, h, key));
     }
 
     /// A reader for looking up keys, on any thread, while this table changes.
@@ -397,16 +412,21 @@ impl LocalTable {
     /// one left with none is deleted.
     ///
     /// The new trees are made durable before the buckets name them, as in
-    /// promotion.  Readers holding a key's old tree keep reading it: its
-    /// pages are not reused (nor yet reclaimed).
+    /// promotion.  Once the buckets are durable too, the old trees are
+    /// [released](Postings::release), with those of keys set or deleted
+    /// since they were promoted: their pages are reused once no reader
+    /// made before can be reading them.
     pub fn compact(&mut self, mut keep: impl FnMut(u64) -> bool) -> Result<Compacted> {
         let mut done = Compacted::default();
         let mut changes = Vec::new();
+        // Trees no bucket names: of keys set or deleted since.
+        let mut unnamed = Vec::new();
         for (h, key) in self.postings.trees() {
-            // Skip trees no bucket names: replaced, or of keys set since.
-            if key.0 == 0
-                || !matches!(entry(self.writer.get(key.0, key.1)), Entry::Promoted(x) if x == h)
-            {
+            if key == (0, 0) {
+                continue;
+            }
+            if !names(&self.writer, h, key) {
+                unnamed.push(h);
                 continue;
             }
             let tree = self.postings.tree(h);
@@ -425,10 +445,12 @@ impl LocalTable {
             };
             changes.push((key, h, new));
         }
-        if changes.is_empty() {
+        if changes.is_empty() && unnamed.is_empty() {
             return Ok(done);
         }
-        self.postings.sync()?;
+        if !changes.is_empty() {
+            self.postings.sync()?;
+        }
         for ((k, k2), old, new) in changes {
             match new {
                 Ok(n) => {
@@ -444,9 +466,10 @@ impl LocalTable {
                     self.promoted.remove(&(k, k2));
                 }
             }
-            self.postings.forget(old);
+            unnamed.push(old);
         }
         self.writer.sync()?;
+        self.postings.release(&unnamed);
         Ok(done)
     }
 
@@ -495,11 +518,19 @@ impl LocalTable {
         } else {
             Postings::open(prefix)?
         };
-        Ok(LocalTable {
+        let mut t = LocalTable {
             writer,
             postings,
             promoted: HashMap::new(),
-        })
+        };
+        t.reclaim_unnamed();
+        Ok(t)
+    }
+
+    /// The pages of the table's postings, and of those the pages free for
+    /// reuse (or waiting for readers made before they were freed).
+    pub fn postings_pages(&self) -> (u64, u64) {
+        (self.postings.pages(), self.postings.free_pages())
     }
 }
 
@@ -915,6 +946,125 @@ mod tests {
         check_key(&t, 3, &[7001]);
         drop(t);
         remove(&prefix).unwrap();
+    }
+
+    /// Adds ids `from..from + n` to key 1 of `t`, then compacts it to the
+    /// last `keep` of them.
+    fn grow_and_compact(t: &mut LocalTable, from: u64, n: u64, keep: u64) {
+        t.insert(1u64, from..from + n).unwrap();
+        let first = (from + n).saturating_sub(keep);
+        t.compact(|id| id >= first).unwrap();
+    }
+
+    #[test]
+    fn repeated_compaction_reuses_pages() {
+        let dir = TempDir::new("reuse");
+        let prefix = dir.prefix("index");
+        let mut t = LocalTable::open(Some(&prefix), Options::default()).unwrap();
+        let mut next = 1;
+        let mut pages = Vec::new();
+        for _ in 0..40 {
+            grow_and_compact(&mut t, next, 20_000, 30_000);
+            next += 20_000;
+            pages.push(t.postings_pages().0);
+        }
+        // A tree of the last 30 000 ids and the next 20 000, a new tree beside
+        // it while compacting, and the pages freed in the round before.
+        assert_eq!(pages[39], pages[9], "{pages:?}");
+        check_key(&t, 1, &(next - 30_000..next).collect::<Vec<_>>());
+        let len = fs::metadata(dir.0.join("index.postings.0")).unwrap().len();
+        drop(t);
+        let mut t = LocalTable::open(Some(&prefix), Options::default()).unwrap();
+        check_key(&t, 1, &(next - 30_000..next).collect::<Vec<_>>());
+        grow_and_compact(&mut t, next, 20_000, 30_000);
+        assert_eq!(t.postings_pages().0, pages[39]);
+        assert_eq!(
+            fs::metadata(dir.0.join("index.postings.0")).unwrap().len(),
+            len
+        );
+    }
+
+    #[test]
+    fn a_reader_holds_back_reuse_of_the_pages_it_may_read() {
+        let mut t = LocalTable::open(None, Options::default()).unwrap();
+        grow_and_compact(&mut t, 1, 20_000, 20_000);
+        let before = t.reader();
+        let old: Vec<u64> = (1..=20_000).collect();
+        let mut cursor = t.reader().iter(1u64);
+        assert_eq!(cursor.next(), Some(1));
+        grow_and_compact(&mut t, 20_001, 20_000, 1_000);
+        let freed = t.postings_pages().1;
+        assert!(freed > 0);
+        // A reader made since doesn't hold the freed pages.
+        let after = t.reader();
+        // Readers made before do: nothing is reused.
+        let pages = t.postings_pages().0;
+        grow_and_compact(&mut t, 40_001, 20_000, 20_000);
+        assert!(t.postings_pages().0 > pages);
+        assert!(t.postings_pages().1 >= freed);
+        assert_eq!(cursor.collect::<Vec<_>>(), old[1..]);
+        assert_eq!(before.count(1u64), 20_000);
+        drop(before);
+        let latest: Vec<u64> = (40_001..60_001).collect();
+        assert_eq!(after.iter(1u64).collect::<Vec<_>>(), latest);
+        // With them gone, the next tree reuses the freed pages.
+        let (pages, free) = t.postings_pages();
+        t.insert(1u64, 60_001..65_001).unwrap();
+        assert_eq!(t.postings_pages().0, pages);
+        assert!(t.postings_pages().1 < free);
+        let mut all = latest;
+        all.extend(60_001..65_001);
+        check_key(&t, 1, &all);
+        assert_eq!(after.iter(1u64).collect::<Vec<_>>(), all);
+    }
+
+    #[test]
+    fn opening_frees_the_pages_of_unnamed_trees() {
+        let dir = TempDir::new("unnamed");
+        let prefix = dir.prefix("index");
+        let mut t = LocalTable::open(Some(&prefix), Options::default()).unwrap();
+        t.insert(1u64, 1..=5_000).unwrap();
+        t.insert(2u64, 1..=5_000).unwrap();
+        t.insert(3u64, 1..=5_000).unwrap();
+        let pages = t.postings_pages().0;
+        // Key 2's tree is left unnamed by `set`, and key 3's by `delete`.
+        t.set(2u64, 7).unwrap();
+        t.delete(3u64).unwrap();
+        t.sync().unwrap();
+        assert_eq!(t.postings_pages(), (pages, 0));
+        drop(t);
+        let mut t = LocalTable::open(Some(&prefix), Options::default()).unwrap();
+        let (pages, free) = t.postings_pages();
+        assert!(
+            free * 3 >= (pages - 1) * 2 - 2,
+            "{pages} pages, {free} free"
+        );
+        check_key(&t, 1, &(1..=5_000).collect::<Vec<_>>());
+        assert_eq!(t.find_one(2u64), Some(7));
+        check_key(&t, 3, &[]);
+        // New trees take the free pages.
+        t.insert(4u64, 1..=5_000).unwrap();
+        t.insert(5u64, 1..=5_000).unwrap();
+        assert_eq!(t.postings_pages().0, pages);
+        check_key(&t, 4, &(1..=5_000).collect::<Vec<_>>());
+        check_key(&t, 5, &(1..=5_000).collect::<Vec<_>>());
+        check_key(&t, 1, &(1..=5_000).collect::<Vec<_>>());
+        drop(t);
+        let t = LocalTable::open(Some(&prefix), Options::default()).unwrap();
+        for k in [1u64, 4, 5] {
+            check_key(&t, k, &(1..=5_000).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn compaction_releases_the_trees_of_keys_set_since() {
+        let mut t = LocalTable::open(None, Options::default()).unwrap();
+        t.insert(1u64, 1..=5_000).unwrap();
+        t.set(1u64, 9).unwrap();
+        assert_eq!(t.postings_pages().1, 0);
+        assert_eq!(t.compact(|_| true).unwrap(), Compacted::default());
+        assert!(t.postings_pages().1 > 0);
+        assert_eq!(t.find_one(1u64), Some(9));
     }
 
     #[test]

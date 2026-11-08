@@ -674,6 +674,16 @@ impl Shell {
             },
         );
         write!(self.out, "{text}").map_err(|e| e.to_string())?;
+        // Each table's postings have a header page; more means trees.
+        let (pages, free) = self.g.local().postings_pages();
+        if pages > self.g.local().table_count() as u64 {
+            writeln!(
+                self.out,
+                "postings:     {pages} pages of {} KiB, {free} free",
+                graqlite::postings::PAGE / 1024
+            )
+            .map_err(|e| e.to_string())?;
+        }
         let mut namer = Namer::new(&self.g, self.style);
         if let Some(a) = self.session.author() {
             writeln!(self.out, "author:       {}", namer.name(a)).map_err(|e| e.to_string())?;

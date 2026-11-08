@@ -100,8 +100,10 @@
 //! A reader can't see an index level the writer has retired: a lookup
 //! re-reads the current level, and one still on a retired level holds it
 //! until it returns, when it is unmapped (see
-//! [`dynamic_table`](crate::dynamic_table)).  The pages of large index
-//! entries are never reclaimed, and compaction builds new ones.
+//! [`dynamic_table`](crate::dynamic_table)).  Compaction builds large
+//! index entries new trees, and the old trees' pages are reused once every
+//! reader made before has been dropped (see
+//! [`postings`](crate::postings#compaction)).
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -525,7 +527,8 @@ impl Graph {
     /// before it.  `horizon` must be committed; one before the current
     /// horizon is taken as that, to compact the entries made large since.
     ///
-    /// The space of the old entries is not yet reused.
+    /// The pages of the old entries are reused once the readers made before
+    /// are dropped.
     pub fn compact(&mut self, horizon: u64) -> Result<crate::local_table::Compacted> {
         let committed = self.local.log().metadata().next_id;
         if horizon >= committed {

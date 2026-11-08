@@ -88,5 +88,6 @@ predicates:   3
 rules:        0
 transaction:  none
 compacted:    to 5228, so as of earlier fails
+postings:     29 pages of 4 KiB, 6 free
 tests/cli/compact.graql:78: error: as of 100 is before 5228, the horizon the indexes are compacted to
 [exit 1]

@@ -205,3 +205,43 @@ fn reading_while_appending() {
     });
     check(&p.tree(h), &all);
 }
+
+#[test]
+fn releasing_frees_every_page_of_a_tree_once_unpinned() {
+    let mut p = Postings::open(None).unwrap();
+    // A tree of height 2, grown by appends, and a small one kept.
+    let big = ids(400_000, 1, 1_000_000);
+    let h = p.create(&big[..1]).unwrap();
+    for chunk in big[1..].chunks(10_007) {
+        p.append(h, chunk).unwrap();
+    }
+    assert_eq!(p.shared.load(h, H_HEIGHT), 2);
+    let small = ids(5_000, 1, 1_000);
+    let s = p.create(&small).unwrap();
+    let small_pages = p.shared.tree_pages(s, p.used).unwrap().len() as u64;
+    let pages = p.pages();
+    let reader = p.reader();
+    let held = reader.tree(h);
+    p.release(&[h]);
+    // Every page but the file header's and the small tree's.
+    assert_eq!(p.free_pages(), pages - 1 - small_pages);
+    assert_eq!(p.trees(), vec![(s, (0, 0))]);
+    // Held by a reader made before, and by its tree: none is reused.
+    drop(reader);
+    let again = p.create(&big[..50_000]).unwrap();
+    assert!(p.pages() > pages);
+    check(&held, &big);
+    // A reader made after the release doesn't hold them.
+    let after = p.reader();
+    drop(held);
+    let pages = p.pages();
+    let more = p.create(&big[..50_000]).unwrap();
+    assert_eq!(p.pages(), pages);
+    check(&after.tree(more), &big[..50_000]);
+    check(&p.tree(again), &big[..50_000]);
+    check(&p.tree(s), &small);
+    // Releasing a tree twice, or a page that isn't a tree's, does nothing.
+    let free = p.free_pages();
+    p.release(&[h, 3]);
+    assert_eq!(p.free_pages(), free);
+}

@@ -41,14 +41,30 @@
 //!
 //! Compacting a key (see [`LocalTable::compact`](crate::local_table::LocalTable::compact))
 //! builds it a new tree rather than changing the old one, which its readers
-//! may still hold.  The old tree's pages are not yet reclaimed.
+//! may still hold.  The table then [releases](Postings::release) the old
+//! tree, once no bucket durably names it, and its pages go on a free list
+//! that new pages are taken from before a segment grows.
+//!
+//! A released page is reused only when no reader can still be reading it.
+//! Every [`Tree`] and [`Cursor`] holds a *pin*, taken by its
+//! [`PostingsReader`] when that was made (or by the writer, renewed at each
+//! release), and pins are counted by *epoch*, which each release advances.
+//! The pages released in an epoch are free once no pin of that epoch or an
+//! earlier one is left: a reader made later looks keys up after the release,
+//! and so never finds the old tree.  A reader that lives long holds back
+//! reuse, as a graph reader's snapshot holds back compaction.
+//!
+//! The free list is not written down.  Opening the table rebuilds it (see
+//! [`reclaim_unnamed`](Postings::reclaim_unnamed)) from the trees that
+//! buckets name: every other page is free, including those of trees a crash
+//! left unnamed.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::mmap::{self, Mapping, suffixed};
 
@@ -128,6 +144,59 @@ pub fn remove(prefix: &Path) -> io::Result<()> {
 /// The mapped segments, shared with readers.
 struct Shared {
     segments: [AtomicPtr<Mapping>; MAX_SEGMENTS],
+    pins: Mutex<Pins>,
+}
+
+/// The pins held (see [Compaction](self#compaction)).
+#[derive(Default)]
+struct Pins {
+    /// The epoch of pins taken now: the releases made so far.
+    epoch: u64,
+    /// The pins of each epoch, while there are any.
+    held: BTreeMap<u64, usize>,
+}
+
+/// A hold on the trees as they were when it was taken: their pages are not
+/// reused while it lives.
+struct Pin {
+    shared: Arc<Shared>,
+    epoch: u64,
+}
+
+impl Pin {
+    fn new(shared: &Arc<Shared>) -> Arc<Pin> {
+        let mut pins = shared.pins();
+        let epoch = pins.epoch;
+        *pins.held.entry(epoch).or_default() += 1;
+        drop(pins);
+        Arc::new(Pin {
+            shared: Arc::clone(shared),
+            epoch,
+        })
+    }
+
+    /// The tree whose header is at `header`, as it was published.
+    fn tree(self: &Arc<Self>, header: u64) -> Tree {
+        let s = &self.shared;
+        Tree {
+            pin: Arc::clone(self),
+            count: s.load(header, H_COUNT),
+            root: s.load(header, H_ROOT),
+            height: s.load(header, H_HEIGHT),
+        }
+    }
+}
+
+impl Drop for Pin {
+    fn drop(&mut self) {
+        let mut pins = self.shared.pins();
+        if let Some(n) = pins.held.get_mut(&self.epoch) {
+            *n -= 1;
+            if *n == 0 {
+                pins.held.remove(&self.epoch);
+            }
+        }
+    }
 }
 
 impl Drop for Shared {
@@ -143,6 +212,10 @@ impl Drop for Shared {
 }
 
 impl Shared {
+    fn pins(&self) -> std::sync::MutexGuard<'_, Pins> {
+        self.pins.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Word `w` of `page`, which must be in a mapped segment within its
     /// file.
     fn word(&self, page: u64, w: usize) -> &AtomicU64 {
@@ -204,15 +277,39 @@ impl Shared {
         )
     }
 
-    /// The tree whose header is at `header`, as it was published.
-    fn tree(self: &Arc<Self>, header: u64) -> Tree {
+    /// Every page of the tree at `header`, below `used`, as it was
+    /// published, or `None` if its pages are not a tree's.
+    fn tree_pages(&self, header: u64, used: u64) -> Option<Vec<u64>> {
+        let page_of = |page: u64, kind: u64| {
+            (page > 0 && page < used && self.load(page, 0) == kind).then_some(page)
+        };
+        let mut pages = vec![page_of(header, KIND_HEADER)?];
         let count = self.load(header, H_COUNT);
-        Tree {
-            shared: Arc::clone(self),
-            count,
-            root: self.load(header, H_ROOT),
-            height: self.load(header, H_HEIGHT),
+        if count == 0 {
+            return Some(pages);
         }
+        let mut level = vec![self.load(header, H_ROOT)];
+        for _ in 0..self.load(header, H_HEIGHT) {
+            let mut below = Vec::new();
+            for page in level {
+                pages.push(page_of(page, KIND_INTERNAL)?);
+                // The children within the count, as a cursor reads them.
+                let stored = (self.load(page, I_COUNT) as usize).min(FANOUT);
+                if stored == 0 {
+                    return None;
+                }
+                let n = (0..stored)
+                    .take_while(|&i| self.entry(page, i).1 < count)
+                    .count()
+                    .max(1);
+                below.extend((0..n).map(|i| self.entry(page, i).2));
+            }
+            level = below;
+        }
+        for leaf in level {
+            pages.push(page_of(leaf, KIND_LEAF)?);
+        }
+        Some(pages)
     }
 }
 
@@ -263,6 +360,8 @@ struct Spine {
 /// The posting trees of a table, for the single writer.
 pub struct Postings {
     shared: Arc<Shared>,
+    /// The writer's pin, for the trees it reads, renewed at each release.
+    pin: Arc<Pin>,
     prefix: Option<PathBuf>,
     files: Vec<File>,
     /// The bytes allocated in each segment's file.
@@ -272,25 +371,34 @@ pub struct Postings {
     spines: HashMap<u64, Spine>,
     /// The header pages changed since the last sync.
     dirty: BTreeSet<u64>,
-    /// Every header page, in order.
-    headers: Vec<u64>,
+    /// Every header page not released, in order.
+    headers: BTreeSet<u64>,
+    /// Pages to reuse.
+    free: Vec<u64>,
+    /// The pages released in each epoch, until no pin holds them.
+    released: Vec<(u64, Vec<u64>)>,
 }
 
 impl Postings {
     /// Opens or creates the postings at `prefix`, or in memory, resetting
     /// each tree to its durable state.
     pub fn open(prefix: Option<&Path>) -> io::Result<Self> {
+        let shared = Arc::new(Shared {
+            segments: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
+            pins: Mutex::default(),
+        });
         let mut p = Postings {
-            shared: Arc::new(Shared {
-                segments: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
-            }),
+            pin: Pin::new(&shared),
+            shared,
             prefix: prefix.map(Path::to_path_buf),
             files: Vec::new(),
             allocated: Vec::new(),
             used: 1,
             spines: HashMap::new(),
             dirty: BTreeSet::new(),
-            headers: Vec::new(),
+            headers: BTreeSet::new(),
+            free: Vec::new(),
+            released: Vec::new(),
         };
         let existing = prefix.is_some_and(exists);
         p.open_segment(0, existing)?;
@@ -321,7 +429,7 @@ impl Postings {
                     let durable = p.shared.load(page, H_DURABLE + w);
                     p.store(page, H_COUNT + w, durable);
                 }
-                p.headers.push(page);
+                p.headers.insert(page);
             }
         }
         Ok(p)
@@ -330,7 +438,7 @@ impl Postings {
     /// A reader of these postings, for any thread.
     pub fn reader(&self) -> PostingsReader {
         PostingsReader {
-            shared: Arc::clone(&self.shared),
+            pin: Pin::new(&self.shared),
         }
     }
 
@@ -379,11 +487,21 @@ impl Postings {
         self.shared.word(page, w).store(v, Ordering::Release);
     }
 
-    /// A new page, zeroed, of `kind`.
+    /// A new page, zeroed, of `kind`: a free one if there is one, or else
+    /// the next in the segments.
     fn allocate(&mut self, kind: u64) -> io::Result<u64> {
-        let page = self.used;
-        self.ensure(page)?;
-        self.used += 1;
+        if self.free.is_empty() && !self.released.is_empty() {
+            self.reclaim();
+        }
+        let page = match self.free.pop() {
+            Some(page) => page,
+            None => {
+                let page = self.used;
+                self.ensure(page)?;
+                self.used += 1;
+                page
+            }
+        };
         for w in 1..WORDS {
             self.store(page, w, 0);
         }
@@ -441,7 +559,7 @@ impl Postings {
         let header = self.allocate(KIND_HEADER)?;
         self.publish(header, &spine);
         self.spines.insert(header, spine);
-        self.headers.push(header);
+        self.headers.insert(header);
         Ok(header)
     }
 
@@ -453,9 +571,11 @@ impl Postings {
         self.store(header, H_KEY2, k2);
     }
 
-    /// Every tree made, by header page, with the key recorded for it, or
-    /// `(0, 0)` if none was.  Trees left by [compaction](crate::local_table::LocalTable::compact)
-    /// are here too: a key's tree is the one its bucket names.
+    /// Every tree made and not released, by header page, with the key
+    /// recorded for it, or `(0, 0)` if none was.  Trees left by
+    /// [compaction](crate::local_table::LocalTable::compact), or by a key
+    /// set since, are here until released: a key's tree is the one its
+    /// bucket names.
     pub fn trees(&self) -> Vec<(u64, (u64, u64))> {
         self.headers
             .iter()
@@ -463,10 +583,80 @@ impl Postings {
             .collect()
     }
 
-    /// Stops tracking the right edge of the tree at `header`, which is no
-    /// longer appended to.  Its pages stay as they are, for its readers.
-    pub fn forget(&mut self, header: u64) {
-        self.spines.remove(&header);
+    /// Releases the trees at `headers`, which no bucket names durably any
+    /// more, so that their pages are reused once no reader made before can
+    /// be reading them (see [Compaction](self#compaction)).  A tree whose
+    /// pages are not a tree's is left alone.
+    pub fn release(&mut self, headers: &[u64]) {
+        let mut pages = Vec::new();
+        for &h in headers {
+            if !self.headers.remove(&h) {
+                continue;
+            }
+            self.spines.remove(&h);
+            self.dirty.remove(&h);
+            pages.extend(self.shared.tree_pages(h, self.used).unwrap_or_default());
+        }
+        if pages.is_empty() {
+            return;
+        }
+        let mut pins = self.shared.pins();
+        let epoch = pins.epoch;
+        pins.epoch += 1;
+        drop(pins);
+        self.released.push((epoch, pages));
+        self.pin = Pin::new(&self.shared);
+    }
+
+    /// Moves the released pages that no pin holds to the free list.
+    fn reclaim(&mut self) {
+        let oldest = self.shared.pins().held.keys().next().copied();
+        let n = self
+            .released
+            .iter()
+            .take_while(|(epoch, _)| oldest.is_none_or(|o| *epoch < o))
+            .count();
+        for (_, pages) in self.released.drain(..n) {
+            self.free.extend(pages);
+        }
+    }
+
+    /// Releases, on opening, every tree but those `named` (given each
+    /// tree's header and key) and those with no key recorded, and frees
+    /// every page that is not one of theirs.  Does nothing if a tree kept
+    /// is not well formed.
+    pub fn reclaim_unnamed(&mut self, mut named: impl FnMut(u64, (u64, u64)) -> bool) {
+        let mut kept = BTreeSet::new();
+        let mut used = vec![false; self.used as usize];
+        used[0] = true;
+        for (h, key) in self.trees() {
+            if key != (0, 0) && !named(h, key) {
+                continue;
+            }
+            let Some(pages) = self.shared.tree_pages(h, self.used) else {
+                return;
+            };
+            for page in pages {
+                used[page as usize] = true;
+            }
+            kept.insert(h);
+        }
+        for h in self.headers.difference(&kept) {
+            self.spines.remove(h);
+            self.dirty.remove(h);
+        }
+        self.headers = kept;
+        self.released.clear();
+        self.free = (0..self.used)
+            .rev()
+            .filter(|&p| !used[p as usize])
+            .collect();
+    }
+
+    /// The pages free, or released and waiting for their readers.
+    pub fn free_pages(&self) -> u64 {
+        let released: usize = self.released.iter().map(|(_, p)| p.len()).sum();
+        (self.free.len() + released) as u64
     }
 
     /// The id that ids at or before have been compacted to, or 0.
@@ -631,7 +821,8 @@ impl Postings {
         }
     }
 
-    /// The pages handed out.
+    /// The pages in the segments, in use or [free](Self::free_pages),
+    /// including the file header.
     pub fn pages(&self) -> u64 {
         self.used
     }
@@ -725,7 +916,7 @@ impl Postings {
         for page in 1..p.used {
             if p.shared.load(page, 0) == KIND_HEADER {
                 p.dirty.insert(page);
-                p.headers.push(page);
+                p.headers.insert(page);
             }
         }
         p.sync()?;
@@ -734,34 +925,37 @@ impl Postings {
 }
 
 /// Reads the posting trees of a table, on any thread.
+///
+/// It pins the trees as they were when it was made, so their pages are not
+/// reused while it, or a tree or cursor it made, lives.
 #[derive(Clone)]
 pub struct PostingsReader {
-    shared: Arc<Shared>,
+    pin: Arc<Pin>,
 }
 
 impl PostingsReader {
     /// The tree whose header is at `header`.
     pub fn tree(&self, header: u64) -> Tree {
-        self.shared.tree(header)
+        self.pin.tree(header)
     }
 
     /// The horizon the table was last compacted to (see
     /// [`Postings::horizon`]).
     pub fn horizon(&self) -> u64 {
-        self.shared.load(0, F_HORIZON)
+        self.pin.shared.load(0, F_HORIZON)
     }
 }
 
 impl Postings {
     /// The tree whose header is at `header`.
     pub fn tree(&self, header: u64) -> Tree {
-        self.shared.tree(header)
+        self.pin.tree(header)
     }
 }
 
 /// A tree as it was published when read: its ids are fixed.
 pub struct Tree {
-    shared: Arc<Shared>,
+    pin: Arc<Pin>,
     count: u64,
     root: u64,
     height: u64,
@@ -795,7 +989,7 @@ impl Tree {
 
     fn cursor(&self, target: u64, forward: bool) -> Cursor {
         let mut c = Cursor {
-            shared: Arc::clone(&self.shared),
+            pin: Arc::clone(&self.pin),
             count: self.count,
             forward,
             stack: Vec::new(),
@@ -811,10 +1005,10 @@ impl Tree {
             let n = c.children(page);
             let i = (0..n)
                 .rev()
-                .find(|&i| c.shared.entry(page, i).0 <= target)
+                .find(|&i| c.pin.shared.entry(page, i).0 <= target)
                 .unwrap_or(0);
             c.stack.push((page, i, n));
-            page = c.shared.entry(page, i).2;
+            page = c.pin.shared.entry(page, i).2;
         }
         c.load_leaf(page);
         if forward {
@@ -828,7 +1022,7 @@ impl Tree {
 
 /// Ids of a tree, in one direction, read a leaf at a time.
 pub struct Cursor {
-    shared: Arc<Shared>,
+    pin: Arc<Pin>,
     count: u64,
     forward: bool,
     /// The internal pages above the leaf: each page, the child taken, and
@@ -843,17 +1037,20 @@ pub struct Cursor {
 impl Cursor {
     /// The children of the internal `page` within the count.
     fn children(&self, page: u64) -> usize {
-        let stored = (self.shared.load(page, I_COUNT) as usize).min(FANOUT);
+        let stored = (self.pin.shared.load(page, I_COUNT) as usize).min(FANOUT);
         let mut n = 0;
-        while n < stored && self.shared.entry(page, n).1 < self.count {
+        while n < stored && self.pin.shared.entry(page, n).1 < self.count {
             n += 1;
         }
         n.max(1)
     }
 
     fn load_leaf(&mut self, page: u64) {
-        let rank = self.shared.load(page, L_RANK);
-        self.leaf = self.shared.leaf_ids(page, self.count.saturating_sub(rank));
+        let rank = self.pin.shared.load(page, L_RANK);
+        self.leaf = self
+            .pin
+            .shared
+            .leaf_ids(page, self.count.saturating_sub(rank));
     }
 
     /// Moves to the next leaf in the cursor's direction, if there is one.
@@ -879,12 +1076,12 @@ impl Cursor {
         self.stack.truncate(depth);
         // Down the nearest edge to a leaf.
         let (page, i, _) = self.stack[depth - 1];
-        let mut child = self.shared.entry(page, i).2;
-        while self.shared.load(child, 0) == KIND_INTERNAL {
+        let mut child = self.pin.shared.entry(page, i).2;
+        while self.pin.shared.load(child, 0) == KIND_INTERNAL {
             let n = self.children(child);
             let i = if self.forward { 0 } else { n - 1 };
             self.stack.push((child, i, n));
-            child = self.shared.entry(child, i).2;
+            child = self.pin.shared.entry(child, i).2;
         }
         self.load_leaf(child);
         self.pos = if self.forward { 0 } else { self.leaf.len() };

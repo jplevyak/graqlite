@@ -91,6 +91,6 @@ As designed, with `arc-swap`:
 
 ## Closed
 
-Done. [028](../028-reclaim-posting-pages.md) needs the same for posting
+Done. [028](028-reclaim-posting-pages.md) needs the same for posting
 pages; across processes ([002](../002-multi-process-access.md)) it still
 needs a reader table in shared memory.

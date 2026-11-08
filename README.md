@@ -117,7 +117,9 @@ local ones.
 Index entries that grow large become append-only B+ trees, streamed newest
 first. A graph keeps all its history unless **compacted** (`compact`, or
 `tick` with `Options::history`), which drops from large entries what no query
-as of the horizon or later can see; queries as of earlier then fail.
+as of the horizon or later can see; queries as of earlier then fail. The old
+entries' pages are reused for new ones, so the files stop growing once the
+history is a steady size; `\info` shows the pages free.
 
 ### Threads and readers
 
@@ -128,7 +130,9 @@ is a read-only `Graph` as of the last commit, sharing the writer's memory
 mapped files and index readers, and taking no locks. `reader()` makes one;
 `readers()` gives a handle for other threads, whose `latest()` is a reader
 of the latest commit, published by the writer at each commit. Compaction
-never passes a live reader's commit.
+never passes a live reader's commit, and the pages of the entries it
+replaces are reused once the readers made before it are gone, so a reader
+kept for a long time holds back both.
 
 ```rust
 use graqlite::graph::{Graph, Options};

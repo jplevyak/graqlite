@@ -300,6 +300,16 @@ impl Local {
             .unwrap_or(0)
     }
 
+    /// The pages of the large index entries' trees, over all the tables,
+    /// and of those the pages free for reuse (see
+    /// [`LocalTable::postings_pages`]); both 0 for a reader.
+    pub fn postings_pages(&self) -> (u64, u64) {
+        self.indexes.iter().fold((0, 0), |(n, f), t| {
+            let (pages, free) = t.postings_pages();
+            (n + pages, f + free)
+        })
+    }
+
     /// Compacts the large entries of `tables` to `horizon`, keeping each id
     /// after it and each at or before it that `keep` accepts, given the log.
     /// Every table records the horizon durably first, so a crash part way
