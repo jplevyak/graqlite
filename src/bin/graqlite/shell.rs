@@ -34,6 +34,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "show the query plan of a select, verify or lookup",
     ),
     (
+        "\\copy FILE TEMPLATE",
+        "insert the template for each record of a CSV, TSV or JSON lines file",
+    ),
+    (
         "\\explain analyze STMT",
         "run it, and show each step's actual rows and time",
     ),
@@ -143,7 +147,11 @@ impl Shell {
     pub fn new(g: Graph, location: Option<PathBuf>, style: Style) -> Self {
         Shell {
             g,
-            session: Session::new(),
+            session: {
+                let mut session = Session::new();
+                session.allow_files(true);
+                session
+            },
             location,
             style,
             timing: false,
@@ -474,6 +482,14 @@ impl Shell {
             }
             Output::Verified(found) => writeln!(self.out, "{found}"),
             Output::Done(what) => writeln!(self.out, "{what}"),
+            Output::Loaded { insert, links, .. } => {
+                writeln!(
+                    self.out,
+                    "{} {links}",
+                    if *insert { "INSERT" } else { "DELETE" }
+                )
+            }
+            Output::Exported { rows, .. } => writeln!(self.out, "COPY {rows}"),
             Output::Inserted(n) => writeln!(self.out, "INSERT {n}"),
             Output::Deleted(n) => writeln!(self.out, "DELETE {n}"),
             Output::Defined(name) => writeln!(self.out, "RULE {name}"),
@@ -528,6 +544,7 @@ impl Shell {
             "o" => self.redirect(arg),
             "dump" => self.dump(arg),
             "compact" => self.compact(arg),
+            "copy" => self.copy(arg),
             _ => Err(format!("unknown command \\{name}; try \\?")),
         };
         match result {
@@ -876,6 +893,67 @@ impl Shell {
         }
         write!(self.out, "{text}").map_err(|e| e.to_string())?;
         Ok(String::new())
+    }
+
+    /// `\\copy FILE TEMPLATE`: loads the file, in one transaction, with the
+    /// indexes left unflushed until the end.
+    fn copy(&mut self, arg: &str) -> CommandResult {
+        let usage = || "\\copy needs a file and a template: \\copy FILE TEMPLATE".to_string();
+        let (path, template) = if let Some(rest) = arg.strip_prefix('"') {
+            rest.split_once('"').ok_or_else(usage)?
+        } else {
+            arg.split_once(char::is_whitespace).ok_or_else(usage)?
+        };
+        if template.trim().is_empty() {
+            return Err(usage());
+        }
+        let format = match Path::new(path).extension().and_then(|e| e.to_str()) {
+            Some("tsv") => "tsv",
+            Some("jsonl" | "ndjson") => "jsonl",
+            _ => "csv",
+        };
+        let text = format!(
+            "insert {} from {format} {}",
+            template.trim(),
+            graql::quoted(path)
+        );
+        let statements = graql::parse(&text).map_err(|e| e.to_string())?;
+        let [statement] = &statements[..] else {
+            return Err(usage());
+        };
+        let bulk = !self.in_transaction;
+        if bulk {
+            self.g.begin_bulk().map_err(|e| e.to_string())?;
+        }
+        let start = Instant::now();
+        let result = self.session.run_with(&mut self.g, statement, &self.params);
+        let finished = match result {
+            Ok(output) => {
+                let committed = if bulk { self.commit_graph() } else { Ok(()) };
+                committed.map(|()| output)
+            }
+            Err(e) => {
+                // The rows before the failure were appended: drop them.
+                let _ = self.g.rollback();
+                if self.in_transaction {
+                    self.in_transaction = false;
+                    eprintln!("the transaction was rolled back");
+                }
+                Err(e.to_string())
+            }
+        };
+        if bulk {
+            self.g.end_bulk().map_err(|e| e.to_string())?;
+        }
+        let Output::Loaded { rows, links, .. } = finished? else {
+            return Err("\\copy loaded no file".into());
+        };
+        let seconds = start.elapsed().as_secs_f64().max(1e-9);
+        Ok(format!(
+            "COPY {rows} rows, {links} links in {seconds:.3} s ({:.0} rows/s, {:.0} links/s)",
+            rows as f64 / seconds,
+            links as f64 / seconds
+        ))
     }
 
     fn explain(&mut self, arg: &str, origin: &Origin) -> CommandResult {

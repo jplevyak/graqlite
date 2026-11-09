@@ -545,6 +545,36 @@ impl Writer {
         Ok(())
     }
 
+    /// Starts a table with nothing in it at the level for `size` bytes, as
+    /// a new table with that [`create_size`](Options::create_size) would,
+    /// skipping the expansions on the way.  A table that has been written
+    /// to is left as it is.
+    pub fn presize(&mut self, size: u64) -> Result<()> {
+        let current = self.shared.level.load(Ordering::Relaxed);
+        let target = start_level(size);
+        if target <= current
+            || self.inserts > 0
+            || self.is_expanding()
+            || self.meta.get(current, Field::OverflowBuckets) > 0
+        {
+            return Ok(());
+        }
+        let from = self.shared.level(current).expect("current level is mapped");
+        let empty = |b| from.read(b).is_some_and(|bytes| bytes == [0; BUCKET_BYTES]);
+        if !(0..from.base_buckets).all(empty) {
+            return Ok(());
+        }
+        self.map_level(target)?;
+        // The old level had nothing to move: it is as if fully expanded.
+        self.meta
+            .set(current, Field::ExpandedBuckets, from.base_buckets);
+        self.shared.level.store(target, Ordering::Release);
+        self.shared.levels[current].store(None);
+        self.files[current] = None;
+        self.retired.push(current);
+        Ok(())
+    }
+
     /// Whether anything was written since the last [`sync`](Self::sync).
     /// Opening a table counts: a crash may have left what it finds unflushed.
     pub fn is_dirty(&self) -> bool {

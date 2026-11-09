@@ -320,6 +320,49 @@ impl Local {
         Ok(())
     }
 
+    /// Starts a bulk load: until [`end_bulk`](Self::end_bulk), the indexes
+    /// are marked stale, so a crash has them rebuilt, and nothing need be
+    /// flushed for them in the meantime.
+    pub fn begin_bulk(&mut self) -> Result<()> {
+        self.check_writer()?;
+        self.log.mark_indexes_stale()?;
+        self.unsynced = !self.is_transient();
+        for index in &mut self.indexes {
+            index.set_ordered(false);
+        }
+        Ok(())
+    }
+
+    /// Ends a bulk load, after it is committed or rolled back.  Under
+    /// [`Full`](Synchronous::Full), the indexes are flushed and no longer
+    /// marked stale.
+    pub fn end_bulk(&mut self) -> Result<()> {
+        if self.options.synchronous == Synchronous::Full {
+            self.sync_indexes()?;
+            for index in &mut self.indexes {
+                index.set_ordered(true);
+            }
+        }
+        Ok(())
+    }
+
+    /// Sizes a database with nothing in it for about `tuples` tuples, as
+    /// [`Options::for_tuples`] does on creating one.  A database with
+    /// entries is left as it is.
+    pub fn presize(&mut self, tuples: u64) -> Result<()> {
+        self.check_writer()?;
+        if self.log.next_id() != self.log.start_id() {
+            return Ok(());
+        }
+        self.log
+            .reserve(tuples.saturating_mul(LOG_BYTES_PER_TUPLE))?;
+        let size = tuples.saturating_mul(INDEX_BYTES_PER_TUPLE);
+        for index in &mut self.indexes {
+            index.presize(size)?;
+        }
+        Ok(())
+    }
+
     /// Makes dropping this session like a crash: nothing more is flushed.
     #[cfg(test)]
     pub(crate) fn crash(&mut self) {

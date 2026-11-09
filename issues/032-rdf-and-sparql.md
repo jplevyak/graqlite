@@ -1,6 +1,6 @@
 # RDF formats and a SPARQL front end
 
-**Status:** open · **Size:** large · **Related:** [010](closed/010-language-comparison.md) (the comparison with SPARQL), [014](closed/014-subgraphs.md) (named graphs map to subgraphs), [017](closed/017-graph-layering.md), [033](033-bulk-loading.md), [002](002-multi-process-access.md) (a SPARQL endpoint needs a server)
+**Status:** open · **Size:** large · **Related:** [010](closed/010-language-comparison.md) (the comparison with SPARQL), [014](closed/014-subgraphs.md) (named graphs map to subgraphs), [017](closed/017-graph-layering.md), [033](closed/033-bulk-loading.md), [002](002-multi-process-access.md) (a SPARQL endpoint needs a server)
 
 ## Motivation
 

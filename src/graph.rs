@@ -695,6 +695,25 @@ impl Graph {
         &self.times
     }
 
+    /// Starts a bulk load: a crash before [`end_bulk`](Self::end_bulk) has
+    /// the indexes rebuilt from the log, so nothing need be flushed for
+    /// them until then.  Commit before ending it.
+    pub fn begin_bulk(&mut self) -> Result<()> {
+        Ok(self.local.begin_bulk()?)
+    }
+
+    /// Ends a bulk load, after it is committed or rolled back.
+    pub fn end_bulk(&mut self) -> Result<()> {
+        Ok(self.local.end_bulk()?)
+    }
+
+    /// Sizes a graph with nothing in it for about `tuples` tuples, as
+    /// [`Options::for_tuples`] does on creating one; a graph with entries
+    /// is left as it is.
+    pub fn presize(&mut self, tuples: u64) -> Result<()> {
+        Ok(self.local.presize(tuples)?)
+    }
+
     /// Discards the entries appended since the last commit.  Their ids are not
     /// reused.
     pub fn rollback(&mut self) -> Result<()> {

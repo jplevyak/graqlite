@@ -1597,3 +1597,37 @@ fn opening_under_full_rebuilds_after_a_crash_under_normal() {
     assert!(!g.local.indexes_stale());
     assert_eq!(g.find_by_key(b"/a"), Some(a));
 }
+
+#[test]
+fn a_crash_during_a_bulk_load_rebuilds_the_indexes() {
+    let dir = TempDir::new("bulk");
+    let prefix = dir.prefix("g");
+    let mut g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    let (a, p) = (g.node_by_key(b"/a").unwrap(), g.value(b"p").unwrap());
+    g.commit().unwrap();
+    assert!(!g.local.indexes_stale());
+    g.begin_bulk().unwrap();
+    assert!(g.local.indexes_stale());
+    let o = g.value(b"committed").unwrap();
+    g.link(a, p, o).unwrap();
+    g.commit().unwrap();
+    g.value(b"not committed").unwrap();
+    g.local.crash();
+    drop(g);
+    let mut g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    assert!(!g.local.indexes_stale());
+    assert!(g.find_link(a, p, o).is_some());
+    assert_eq!(g.find_value(b"not committed"), None);
+
+    // A load that finishes leaves nothing to rebuild.
+    g.begin_bulk().unwrap();
+    let o2 = g.value(b"more").unwrap();
+    g.link(a, p, o2).unwrap();
+    g.commit().unwrap();
+    g.end_bulk().unwrap();
+    assert!(!g.local.indexes_stale());
+    drop(g);
+    let g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    assert!(!g.local.indexes_stale());
+    assert!(g.find_link(a, p, o2).is_some());
+}

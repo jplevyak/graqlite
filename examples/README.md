@@ -28,6 +28,7 @@ read them without running anything.
 | [20-symbols-and-graphs](20-symbols-and-graphs.graql) | `SET` of keys, numbers, strings, booleans and graphs; graphs of their own links, `database:g` layering, deleting with `not`, `from graph`, a lookup's graph named and inserted |
 | [21-graph-layering](21-graph-layering.graql) | the session's graphs: `DEFAULT` (a schema under every graph), `DATA {}` (scratch data never written) and `DATA database`, `base:{ … }`, `ASSUME`, a default graph of template rule calls |
 | [22-the-rest-of-the-tour](22-the-rest-of-the-tour.graql) | `- pattern` and `+ pattern` defaults, nested limits, `FUNCTION` (conditions, `+integer`), rule parameters without `?`, `\format tree`, template rules in `INSERT`, `TEST` |
+| [24-loading-files](24-loading-files.graql) | `insert … from csv`, columns by name and position, a clause saying what a column holds, `delete … from csv`; `\copy` |
 | [23-vector-search](23-vector-search.graql) | vectors as values (`vector`, `str`, `distance`), stored by a `let`, `index vector on`, `\di`, `nearest(P q k ?v ?d)` filtered by links, by a parameter and by a bound vector, `\explain` |
 
 Scripts for features open issues will add go in [pending/](pending/README.md);

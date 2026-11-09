@@ -722,6 +722,26 @@ impl LocalRecordLog {
         self.meta.indexes_stale = true;
     }
 
+    /// Records durably, now, that the indexes may not cover the log.
+    pub fn mark_indexes_stale(&mut self) -> Result<()> {
+        self.meta.indexes_stale = true;
+        self.write_metadata()
+    }
+
+    /// Grows the last file to hold `bytes` more entries, within what it has
+    /// reserved, so that appending them needn't grow it.
+    pub fn reserve(&mut self, bytes: u64) -> Result<()> {
+        self.check_writer()?;
+        let last = self.files.last_mut().expect("a log has a file");
+        let used = HEADER + (self.next - last.start_id);
+        let len = round_up_to_page(used.saturating_add(bytes)).min(last.map.len());
+        if len > last.len {
+            mmap::allocate(last.file.as_ref().expect("the writer's file"), len)?;
+            last.len = len;
+        }
+        Ok(())
+    }
+
     /// Records that the indexes cover the commits again, durably.
     pub fn clear_indexes_stale(&mut self) -> Result<()> {
         self.meta.indexes_stale = false;

@@ -1,6 +1,6 @@
 # Python bindings
 
-**Status:** open · **Size:** medium · **Related:** [018](closed/018-snapshot-readers.md) (readers release the GIL), [033](033-bulk-loading.md), [002](002-multi-process-access.md)
+**Status:** open · **Size:** medium · **Related:** [018](closed/018-snapshot-readers.md) (readers release the GIL), [033](closed/033-bulk-loading.md), [002](002-multi-process-access.md)
 
 ## Motivation
 

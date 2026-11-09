@@ -26,6 +26,10 @@ name = "record_log"
 harness = false
 
 [[bench]]
+name = "load"
+harness = false
+
+[[bench]]
 name = "index"
 harness = false
 

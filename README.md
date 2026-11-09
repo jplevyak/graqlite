@@ -432,6 +432,7 @@ commands:
 | `\drop NAME`                | delete every definition of a rule                 |
 | `\info`                     | a summary of the database, with the large index entries' pages and how many are free |
 | `\show ENTRY`               | an entry (`#id`, `/key` or value) and its links   |
+| `\copy FILE TEMPLATE`       | load a CSV, TSV or JSON lines file, one `insert` per record |
 | `\explain STMT`             | the query plan of a `select`, `verify` or `lookup` |
 | `\explain analyze STMT`     | run it, and show each step's actual rows, index entries and time beside the estimates |
 | `\begin`, `\commit`, `\rollback` | transactions                              |
@@ -441,6 +442,18 @@ commands:
 | `\dump FILE`                | write a snapshot (restore it with `--restore`)    |
 | `\compact ID\|TIME`         | drop the history before an id or time from large index entries; `as of` earlier then fails |
 | `\?`, `\q`                  | help; quit                                        |
+
+`\copy FILE TEMPLATE` loads a CSV, TSV or JSON lines file (by its extension)
+in one transaction, inserting the template for each record, and reports the
+rate: `\copy people.csv ?p a person ; name ?name`. The statement underneath is
+`insert TEMPLATE from csv "FILE"`, also `delete`, with `$1`, `$2` for columns by
+position and a clause to say what a column holds: `from csv "f" (key: p, number:
+age, header: false) rows 1000`. A field is a key if it starts with `/`, an entry
+if `#` and digits, and otherwise a value; an empty one leaves out the triples
+that use it. The file streams, a failure leaves nothing, and an empty graph is
+sized for the file first. `select ?a, ?b into csv "FILE" where ...` writes one.
+A library `Session` reads and writes files only after `allow_files(true)`, as
+a statement runs with the process's access to the file system.
 
 `-c TEXT` and `-f FILE` run statements and exit (`-1` runs them in one
 transaction), as does piping a script to standard input. A script runs each

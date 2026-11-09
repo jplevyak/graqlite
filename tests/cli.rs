@@ -367,6 +367,40 @@ fn explain_analyze() {
 }
 
 #[test]
+fn copy_loads_a_file_in_one_transaction() {
+    let dir = std::env::temp_dir().join(format!("graqlite-cli-copy-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let good = dir.join("good.csv");
+    fs::write(&good, "p,n\n/a,1\n/b,2\n").unwrap();
+    let bad = dir.join("bad.csv");
+    fs::write(&bad, "p,n\n/c,1\n/d\n").unwrap();
+    let db = dir.join("db");
+    let (db, good, bad) = (
+        db.to_str().unwrap(),
+        good.to_str().unwrap(),
+        bad.to_str().unwrap(),
+    );
+    let (out, status) = run(&["-q", "-c", &format!("\\copy {good} ?p n ?n"), db], "");
+    assert_eq!(status, 0, "{out}");
+    assert!(out.starts_with("COPY 2 rows, 2 links in "), "{out}");
+    assert!(out.contains("rows/s"), "{out}");
+    // A file that fails part way adds nothing.
+    let (out, status) = run(&["-q", "-c", &format!("\\copy {bad} ?p n ?n"), db], "");
+    assert_ne!(status, 0);
+    assert!(out.contains("expected 2 fields, found 1"), "{out}");
+    let (out, status) = run(
+        &["-q", "--csv", "-c", "select ?p by ?p where ?p n ?n", db],
+        "",
+    );
+    assert_eq!((out.as_str(), status), ("p\n/a\n/b\n", 0));
+    fs::remove_dir_all(&dir).unwrap();
+    let (out, status) = run(&["-q", "-c", "\\copy nofile.csv"], "");
+    assert_ne!(status, 0);
+    assert!(out.contains("\\copy needs a file"), "{out}");
+}
+
+#[test]
 fn options() {
     let (out, status) = run(&["--help"], "");
     assert_eq!(status, 0);

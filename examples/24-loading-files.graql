@@ -1,0 +1,26 @@
+-- Loading a file: each record is a row binding the template's variables by
+-- the header's column names.  A field starting with / is a key; run this
+-- from the top of the repository, as file names are relative to where the
+-- shell runs.  In the shell, `\copy FILE TEMPLATE` is the same statement,
+-- in one transaction, and reports the rate.
+insert ?key a person ; name ?name ; age ?age ; lives ?city from csv "examples/data/people.csv"
+
+select ?name, ?age by ?name where ?p a person ; name ?name ; age ?age
+
+-- Dan's age was empty, so that triple was left out.
+select ?age where /dan age ?age
+
+select ?who, ?where by ?who where ?who lives ?where . ?who name "Ann Lee"
+
+-- A clause says what a column holds, when its text doesn't.  Here the name
+-- is a key, so a slash is added, and age must be a number or the load fails.
+insert ?name years ?age from csv "examples/data/people.csv" (key: name, number: age)
+
+select ?who, ?y where ?who years ?y . ?y > 60
+
+-- Columns can go by position, as $1 and $2.
+delete $1 a person from csv "examples/data/people.csv"
+
+select ?p where ?p a person
+
+-- `select ?a, ?b into csv "FILE" where ...` writes rows the same way.

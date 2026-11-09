@@ -721,6 +721,11 @@ impl LocalTable {
         self.writer.sync()
     }
 
+    /// Sizes a table with nothing in it to hold about `size` bytes.
+    pub fn presize(&mut self, size: u64) -> Result<()> {
+        self.writer.presize(size)
+    }
+
     /// Whether anything was written since the last [`sync`](Self::sync).
     pub fn is_dirty(&self) -> bool {
         self.writer.is_dirty() || self.postings.is_dirty()

@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use super::{
-    AsOf, Comparison, GraphExpr, KEYWORDS, Node, Path, Pattern, RuleDef, SelectItem, SetValue,
-    Statement, TestOperand, Window,
+    AsOf, Comparison, FileSource, GraphExpr, KEYWORDS, Node, Path, Pattern, RuleDef, SelectItem,
+    SetValue, Statement, TestOperand, Window,
 };
 use crate::query::Cmp;
 use crate::times::format_time;
@@ -106,6 +106,8 @@ impl Printer {
 
     fn node(&mut self, n: &Node) -> String {
         match n {
+            // A file's column by position: only `$1` reads as that.
+            Node::Var(v) if v.bytes().all(|b| b.is_ascii_digit()) => format!("${v}"),
             Node::Var(v) => format!("?{v}"),
             Node::Blank(b) if b.starts_with("_:") => b.clone(),
             Node::Blank(b) => {
@@ -524,6 +526,37 @@ impl fmt::Display for Path {
     }
 }
 
+/// `text` as a quoted string, which [`literal`] leaves bare if it can be.
+pub fn quoted(text: &str) -> String {
+    let l = literal(text);
+    if l.starts_with('"') {
+        l
+    } else {
+        format!("\"{l}\"")
+    }
+}
+
+impl fmt::Display for FileSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.format.name(), quoted(&self.path))?;
+        let mut clause: Vec<String> = self
+            .kinds
+            .iter()
+            .map(|(column, kind)| format!("{}: {}", kind.name(), quoted(column)))
+            .collect();
+        if !self.header {
+            clause.push("header: false".into());
+        }
+        if !clause.is_empty() {
+            write!(f, " ( {} )", clause.join(", "))?;
+        }
+        if let Some(n) = self.rows {
+            write!(f, " rows {n}")?;
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for Window {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut parts = Vec::new();
@@ -731,11 +764,13 @@ fn write_statement(
                 template,
                 pattern,
                 graph,
+                source,
             }
             | Statement::Delete {
                 template,
                 pattern,
                 graph,
+                source,
             } => {
                 let mut printer = Printer::new(template.iter().chain(pattern));
                 let (verb, to) = if matches!(s, Statement::Insert { .. }) {
@@ -747,10 +782,26 @@ fn write_statement(
                 if let Some(g) = graph {
                     write!(f, " {to} {}", printer.node(g))?;
                 }
+                if let Some(s) = source {
+                    write!(f, " from {s}")?;
+                }
                 if let Some(p) = pattern {
                     write!(f, " where {}", printer.disjunction(p))?;
                 }
                 Ok(())
+            }
+            Statement::Export {
+                format,
+                path,
+                statement,
+            } => {
+                // `into` goes after the selected items, and before `where`.
+                let text = statement.to_string();
+                let into = format!(" into {} {}", format.name(), quoted(path));
+                match text.find(" where ") {
+                    Some(at) => write!(f, "{}{into}{}", &text[..at], &text[at..]),
+                    None => write!(f, "{text}{into}"),
+                }
             }
             Statement::InsertGraph { source, graph } => {
                 write!(f, "insert graph {source}")?;

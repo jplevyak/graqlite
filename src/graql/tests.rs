@@ -584,11 +584,13 @@ fn normal(s: &Statement) -> Statement {
             template,
             pattern: p,
             graph,
+            source,
         }
         | Statement::Delete {
             template,
             pattern: p,
             graph,
+            source,
         } => {
             let mut t = Pattern::And(template.clone());
             rename_blanks(&mut t, &mut names);
@@ -601,17 +603,21 @@ fn normal(s: &Statement) -> Statement {
                     template,
                     pattern: p,
                     graph: graph.clone(),
+                    source: source.clone(),
                 }
             } else {
                 Statement::Delete {
                     template,
                     pattern: p,
                     graph: graph.clone(),
+                    source: source.clone(),
                 }
             }
         }
         Statement::DeleteRule(n) => Statement::DeleteRule(n.clone()),
-        s @ (Statement::IndexVector { .. } | Statement::DeleteIndex(_)) => s.clone(),
+        s @ (Statement::IndexVector { .. }
+        | Statement::DeleteIndex(_)
+        | Statement::Export { .. }) => s.clone(),
         Statement::InsertGraph { source, graph } => Statement::InsertGraph {
             source: normal_graph(source),
             graph: graph.clone(),
@@ -3695,4 +3701,328 @@ fn estimates_are_near_the_actual_rows_in_the_examples() {
     }
     assert!(checked > 100, "{checked}");
     assert!(worst.0 <= FACTOR, "{worst:?}");
+}
+
+/// A session that may read files, and a temporary directory for them.
+struct Files {
+    dir: std::path::PathBuf,
+    session: Session,
+    g: Graph,
+}
+
+impl Files {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("graqlite-load-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = Session::new();
+        session.allow_files(true);
+        Files {
+            dir,
+            session,
+            g: graph(),
+        }
+    }
+
+    /// Writes `text` to `name`, returning its path.
+    fn file(&self, name: &str, text: &str) -> String {
+        let path = self.dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    fn run(&mut self, text: &str) -> Output {
+        self.session
+            .execute(&mut self.g, text)
+            .unwrap()
+            .pop()
+            .unwrap()
+    }
+
+    fn fails(&mut self, text: &str) -> String {
+        match self.session.execute(&mut self.g, text) {
+            Err(e) => e.to_string(),
+            Ok(o) => panic!("{text} gave {o:?}"),
+        }
+    }
+
+    fn select(&mut self, text: &str) -> Vec<Vec<String>> {
+        let out = self.run(text);
+        let g = &self.g;
+        let mut rows: Vec<Vec<String>> = rows(&out)
+            .iter()
+            .map(|r| r.iter().map(|&id| entry_text(g, id)).collect())
+            .collect();
+        rows.sort();
+        rows
+    }
+}
+
+impl Drop for Files {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn strs(rows: &[&[&str]]) -> Vec<Vec<String>> {
+    rows.iter()
+        .map(|r| r.iter().map(|s| s.to_string()).collect())
+        .collect()
+}
+
+#[test]
+fn inserting_from_a_csv() {
+    let mut f = Files::new("csv");
+    let path = f.file(
+        "people.csv",
+        "p,name,city\n/ann,\"Ann, A\",/paris\n/ben,Ben,\n",
+    );
+    let out = f.run(&format!(
+        "insert ?p a person ; name ?name ; city ?city from csv {path:?}"
+    ));
+    assert_eq!(
+        out,
+        Output::Loaded {
+            insert: true,
+            rows: 2,
+            links: 5
+        }
+    );
+    assert_eq!(
+        f.select("select ?n where /ann name ?n"),
+        strs(&[&["Ann, A"]])
+    );
+    // /paris is a key, and Ben's empty city left out its triple.
+    assert_eq!(
+        f.select("select ?p where ?p city /paris"),
+        strs(&[&["/ann"]])
+    );
+    assert_eq!(f.select("select ?c where /ben city ?c"), strs(&[]));
+    // Loading it again adds no links.
+    let out = f.run(&format!("insert ?p a person from csv {path:?}"));
+    assert!(
+        matches!(
+            out,
+            Output::Loaded {
+                rows: 2,
+                links: 0,
+                ..
+            }
+        ),
+        "{out:?}"
+    );
+    // Delete has the same shape.
+    let out = f.run(&format!("delete ?p a person from csv {path:?}"));
+    assert!(
+        matches!(
+            out,
+            Output::Loaded {
+                insert: false,
+                links: 2,
+                ..
+            }
+        ),
+        "{out:?}"
+    );
+    assert_eq!(f.select("select ?p where ?p a person"), strs(&[]));
+}
+
+#[test]
+fn columns_by_position_kind_and_format() {
+    let mut f = Files::new("kinds");
+    let path = f.file("a.csv", "/x,5\n/y,6\n");
+    f.run(&format!(
+        "insert $1 score $2 from csv {path:?} (header: false, number: 2)"
+    ));
+    assert_eq!(f.select("select ?s where /y score ?s"), strs(&[&["6"]]));
+
+    // A key column's text gets its slash; a value column keeps its own.
+    let path = f.file("b.csv", "who,tag\nzed,/not-a-key\n");
+    f.run(&format!(
+        "insert ?who tagged ?tag from csv {path:?} (key: who, value: tag)"
+    ));
+    assert_eq!(
+        f.select("select ?t where /zed tagged ?t"),
+        strs(&[&["/not-a-key"]])
+    );
+    assert_eq!(f.g.find_by_key(b"/not-a-key"), None);
+
+    // An #id names that entry, and a header column can be used by position.
+    let id = f.g.find_by_key(b"/zed").unwrap();
+    let path = f.file("c.tsv", &format!("subject\tn\n#{id}\tsome\\tthing\n"));
+    f.run(&format!("insert $1 said $2 from tsv {path:?}"));
+    assert_eq!(
+        f.select("select ?t where /zed said ?t"),
+        strs(&[&["some\tthing"]])
+    );
+
+    let path = f.file("d.jsonl", "{\"p\": \"/j\", \"age\": 30, \"nick\": null}\n");
+    let out = f.run(&format!(
+        "insert ?p age ?age ; nick ?nick from jsonl {path:?}"
+    ));
+    assert!(
+        matches!(
+            out,
+            Output::Loaded {
+                rows: 1,
+                links: 1,
+                ..
+            }
+        ),
+        "{out:?}"
+    );
+    assert_eq!(f.select("select ?a where /j age ?a"), strs(&[&["30"]]));
+
+    // A blank node is new for each row.
+    let path = f.file("e.csv", "n\na\nb\n");
+    f.run(&format!(
+        "insert [ labelled ?n ] kind thing from csv {path:?}"
+    ));
+    assert_eq!(f.select("select ?x where ?x kind thing").len(), 2);
+
+    // Into a subgraph, and a rows hint.
+    let path = f.file("f.csv", "p\n/in\n");
+    f.run(&format!(
+        "insert ?p a member into /club from csv {path:?} rows 1"
+    ));
+    assert_eq!(
+        f.select("select ?p from /club where ?p a member"),
+        strs(&[&["/in"]])
+    );
+}
+
+#[test]
+fn load_errors_name_the_place() {
+    let mut f = Files::new("errors");
+    let path = f.file("a.csv", "p,n\n/x,1\n/y,two\n");
+    let e = f.fails(&format!("insert ?p n ?nope from csv {path:?}"));
+    assert!(e.contains("no column nope") && e.contains("p, n"), "{e}");
+    let e = f.fails(&format!("insert ?p n ?n from csv {path:?} (number: n)"));
+    assert!(e.contains(":3: column n: two is not a number"), "{e}");
+    let e = f.fails(&format!("insert ?p n ?n from csv {path:?} where ?p a b"));
+    assert!(e.contains("can't have 'where'"), "{e}");
+    let e = f.fails(&format!("insert ?p n ?n from csv {path:?} (colour: n)"));
+    assert!(e.contains("expected key, id, value"), "{e}");
+    let e = f.fails(&format!(
+        "insert ?p n ?n from csv {:?}",
+        format!("{path}.missing")
+    ));
+    assert!(e.contains(".missing"), "{e}");
+    let e = f.fails(&format!("insert $9 n $1 from csv {path:?}"));
+    assert!(e.contains("no column 9"), "{e}");
+    let e = f.fails(&format!("insert $1 n $2 from jsonl {path:?}"));
+    assert!(e.contains("no column"), "{e}");
+    // An id naming no entry fails as a template's does.
+    let bad = f.file("b.csv", "p\n#999999\n");
+    let e = f.fails(&format!("insert ?p a b from csv {bad:?}"));
+    assert!(e.contains("names no entry"), "{e}");
+}
+
+#[test]
+fn files_need_permission() {
+    let f = Files::new("permission");
+    let path = f.file("a.csv", "p\n/x\n");
+    let mut g = graph();
+    for text in [
+        format!("insert ?p a b from csv {path:?}"),
+        format!(
+            "select ?p into csv {:?} where ?p a b",
+            format!("{path}.out")
+        ),
+    ] {
+        let e = execute(&mut g, &text).unwrap_err().to_string();
+        assert!(e.contains("may not read or write files"), "{e}");
+    }
+    assert!(!std::path::Path::new(&format!("{path}.out")).exists());
+}
+
+#[test]
+fn file_statements_print_and_reparse() {
+    for text in [
+        "insert ?p a b from csv \"x.csv\"",
+        "insert ?p a b into /g from tsv \"x y.tsv\" ( key: \"p\", header: false ) rows 7",
+        "delete ?p a b from /g from jsonl \"x\"",
+        "select ?p into csv \"o.csv\" where ?p a b",
+    ] {
+        let printed = parse(text).unwrap()[0].to_string();
+        let reparsed = parse(&printed).unwrap_or_else(|e| panic!("{printed}: {e}"));
+        assert_eq!(printed, reparsed[0].to_string(), "{text}");
+        assert_eq!(reparsed, parse(text).unwrap(), "{text}");
+    }
+    // `$1` is a column of the file, and prints as it was written.
+    let printed = parse("insert $1 a b from csv \"x\"").unwrap()[0].to_string();
+    assert!(printed.starts_with("insert $1 "), "{printed}");
+    assert_eq!(parse(&printed).unwrap()[0].to_string(), printed);
+    // A subgraph can still be named csv.
+    assert!(matches!(
+        &parse("delete ?a b c from csv where ?a b c").unwrap()[0],
+        Statement::Delete {
+            source: None,
+            graph: Some(_),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn exporting_and_loading_back() {
+    let mut f = Files::new("export");
+    f.run("insert /a name \"x, y\" ; age 3 . /b name \"line\\nbreak\"");
+    for format in ["csv", "tsv", "jsonl"] {
+        let out = f.dir.join(format!("out.{format}"));
+        let out = out.to_str().unwrap().to_string();
+        let done = f.run(&format!(
+            "select ?p, ?n, ?age into {format} {out:?} where ?p name ?n . optional ( ?p age ?age )"
+        ));
+        assert_eq!(
+            done,
+            Output::Exported {
+                path: out.clone(),
+                rows: 2
+            }
+        );
+        f.run(&format!(
+            "insert ?p copied_{format} ?n ; age_{format} ?age from {format} {out:?}"
+        ));
+        assert_eq!(
+            f.select(&format!("select ?n where /a copied_{format} ?n")),
+            strs(&[&["x, y"]]),
+            "{format}"
+        );
+        assert_eq!(
+            f.select(&format!("select ?n where /b copied_{format} ?n")),
+            strs(&[&["line\nbreak"]]),
+            "{format}"
+        );
+        assert_eq!(
+            f.select(&format!("select ?n where /b age_{format} ?n")),
+            strs(&[])
+        );
+    }
+    // Computed columns too.
+    let out = f.dir.join("n.csv");
+    let out = out.to_str().unwrap().to_string();
+    f.run(&format!(
+        "select count(?p) into csv {out:?} where ?p name ?n"
+    ));
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(text.ends_with("\n2\n"), "{text}");
+}
+
+#[test]
+fn a_load_presizes_an_empty_graph_and_answers_the_same() {
+    let mut f = Files::new("presize");
+    let csv: String = std::iter::once("p,n\n".to_string())
+        .chain((0..3000).map(|i| format!("/p{i},{}\n", i % 7)))
+        .collect();
+    let path = f.file("a.csv", &csv);
+    let prefix = f.dir.join("db.");
+    f.g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    f.run(&format!("insert ?p n ?n from csv {path:?}"));
+    f.g.commit().unwrap();
+    assert_eq!(f.select("select ?p where ?p n 3").len(), 429);
+    drop(std::mem::replace(&mut f.g, graph()));
+    f.g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    assert_eq!(f.select("select ?p where ?p n 3").len(), 429);
+    assert_eq!(f.select("select ?n where /p10 n ?n"), strs(&[&["3"]]));
 }

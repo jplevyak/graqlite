@@ -559,3 +559,34 @@ fn remove_and_exists() {
     assert!(!exists(&prefix));
     assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0, "no files left");
 }
+
+#[test]
+fn presizing_an_empty_table() {
+    let dir = std::env::temp_dir().join(format!("graqlite-presize-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prefix = dir.join("t.");
+    let mut w = Writer::open(Some(&prefix), Options::default()).unwrap();
+    let reader = w.reader();
+    w.presize(1 << 20).unwrap();
+    assert!(w.shared.level.load(Ordering::Relaxed) > 0);
+    let level = w.shared.level.load(Ordering::Relaxed);
+    for k in 1..=2000u64 {
+        w.insert(k, 0, false, &[k]).unwrap();
+    }
+    // A table written to isn't sized again.
+    w.presize(1 << 30).unwrap();
+    assert_eq!(w.shared.level.load(Ordering::Relaxed), level);
+    w.sync().unwrap();
+    assert_eq!(reader.get(7, 0).unwrap().values, [7]);
+    drop(w);
+    drop(reader);
+    // The level below it is gone, and the table reopens at the new one.
+    assert!(!level_path(&prefix, 0).exists());
+    let w = Writer::open(Some(&prefix), Options::default()).unwrap();
+    assert_eq!(w.shared.level.load(Ordering::Relaxed), level);
+    for k in 1..=2000u64 {
+        assert_eq!(w.get(k, 0).unwrap().values, [k]);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

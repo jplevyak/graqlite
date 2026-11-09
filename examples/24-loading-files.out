@@ -1,0 +1,23 @@
+INSERT 15
+ name             | age
+------------------+-----
+ "Ann Lee"        | 34
+ Ben              | 27
+ "Cat, the elder" | 61
+(3 rows)
+ age
+-----
+(0 rows)
+ who  | where
+------+--------
+ /ann | /paris
+(1 row)
+INSERT 3
+ who             | y
+-----------------+----
+ /Cat, the elder | 61
+(1 row)
+DELETE 4
+ p
+---
+(0 rows)

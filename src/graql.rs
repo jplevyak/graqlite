@@ -496,7 +496,11 @@ fn lex(text: &str) -> Result<Vec<Spanned>> {
                 .parse()
                 .map_err(|_| error(line, column, format!("#{digits} is not an id")))?;
             (Token::Id(id), end)
-        } else if c == '$' && rest.get(1).is_some_and(|&c| is_ident_start(c)) {
+        } else if c == '$'
+            && rest
+                .get(1)
+                .is_some_and(|&c| is_ident_start(c) || c.is_ascii_digit())
+        {
             let end = take_while(1, is_ident);
             (Token::Param(rest[1..end].iter().collect()), end)
         } else if starts("_:") {
@@ -841,6 +845,54 @@ impl Window {
     }
 }
 
+/// How a column of a file names an entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnKind {
+    /// A key: a `/` is added if it hasn't one.
+    Key,
+    /// An `#id`, or a number that is one.
+    Id,
+    /// A value, whatever it looks like.
+    Value,
+    /// A value that must be a number.
+    Number,
+}
+
+impl ColumnKind {
+    fn of_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "key" => Some(ColumnKind::Key),
+            "id" => Some(ColumnKind::Id),
+            "value" => Some(ColumnKind::Value),
+            "number" => Some(ColumnKind::Number),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            ColumnKind::Key => "key",
+            ColumnKind::Id => "id",
+            ColumnKind::Value => "value",
+            ColumnKind::Number => "number",
+        }
+    }
+}
+
+/// A file whose records are the rows of an `insert` or `delete`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSource {
+    pub format: FileFormat,
+    pub path: String,
+    /// The columns whose kind is given.  Others are keys if they start with
+    /// `/`, ids if `#` and digits, and else values.
+    pub kinds: Vec<(String, ColumnKind)>,
+    /// Whether the first line names the columns; if not, they are `$1`, ….
+    pub header: bool,
+    /// The records expected, to size the graph by, if given.
+    pub rows: Option<u64>,
+}
+
 /// A rule: its relation's name, head variables and body.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuleDef {
@@ -1058,6 +1110,7 @@ fn expand_calls(statement: &mut Statement, rules: &[RuleDef]) -> Result<()> {
                 graph(source, out);
                 graphs(statement, out);
             }
+            Statement::Export { statement, .. } => graphs(statement, out),
             Statement::Test { operands, .. } => {
                 for o in operands.iter_mut() {
                     match o {
@@ -1138,6 +1191,8 @@ pub enum Statement {
         /// `into g`: the subgraph the template's links are added to, unless
         /// they name their own.
         graph: Option<Node>,
+        /// `from csv "FILE"`: the file whose records are the rows.
+        source: Option<FileSource>,
     },
     Delete {
         template: Vec<Pattern>,
@@ -1145,6 +1200,14 @@ pub enum Statement {
         /// `from g`: the subgraph the template's links are removed from,
         /// leaving them live, unless they name their own.
         graph: Option<Node>,
+        /// `from csv "FILE"`: the file whose records are the rows.
+        source: Option<FileSource>,
+    },
+    /// `select … into csv "FILE"`: the rows of a `select`, written to a file.
+    Export {
+        format: FileFormat,
+        path: String,
+        statement: Box<Statement>,
     },
     /// `insert graph G [into g]`: a graph's links, such as a lookup's and
     /// those it derives, linked (into `g`).
@@ -1494,13 +1557,35 @@ impl Parser {
                 Ok(Statement::InsertGraph { source, graph })
             }
             Token::Keyword(k @ ("insert" | "delete")) => {
-                let template = self.template()?;
+                let mut template = self.template()?;
                 let to = if k == "insert" { "into" } else { "from" };
-                let graph = if self.keyword(to) {
+                let graph = if !self.file_follows() && self.keyword(to) {
                     Some(self.graph_name()?)
                 } else {
                     None
                 };
+                let source = if self.file_follows() {
+                    self.next();
+                    Some(self.file_source()?)
+                } else {
+                    None
+                };
+                if source.is_some() {
+                    if self.is(&Token::Keyword("where")) {
+                        return self
+                            .syntax("a file gives the rows: it can't have 'where'".to_string());
+                    }
+                    // `$1` is a column's position, as `?1` is, not a parameter.
+                    for t in &mut template {
+                        print::each_node_mut(t, &mut |n| {
+                            if let Node::Param(p) = n
+                                && p.bytes().all(|b| b.is_ascii_digit())
+                            {
+                                *n = Node::Var(std::mem::take(p));
+                            }
+                        });
+                    }
+                }
                 let pattern = if self.keyword("where") {
                     Some(self.pattern()?)
                 } else {
@@ -1511,12 +1596,14 @@ impl Parser {
                         template,
                         pattern,
                         graph,
+                        source,
                     }
                 } else {
                     Statement::Delete {
                         template,
                         pattern,
                         graph,
+                        source,
                     }
                 })
             }
@@ -1763,6 +1850,11 @@ impl Parser {
             since,
             history,
         } = self.window()?;
+        let mut export = None;
+        if self.is(&Token::Keyword("into")) {
+            self.next();
+            export = Some(self.file_target()?);
+        }
         let mut source = None;
         let graph = if self.keyword("from") {
             if self.keyword("graph") {
@@ -1831,9 +1923,17 @@ impl Parser {
             offset,
             as_of,
         };
-        Ok(match source {
+        let select = match source {
             Some(source) => Statement::From {
                 source,
+                statement: Box::new(select),
+            },
+            None => select,
+        };
+        Ok(match export {
+            Some((format, path)) => Statement::Export {
+                format,
+                path,
                 statement: Box::new(select),
             },
             None => select,
@@ -2076,6 +2176,84 @@ impl Parser {
         self.next();
         self.next();
         self.point_in_time("as of").map(Some)
+    }
+
+    /// Whether `from csv "FILE"` comes next.
+    fn file_follows(&self) -> bool {
+        let token = |i: usize| self.tokens.get(self.pos + i).map(|t| &t.token);
+        token(0) == Some(&Token::Keyword("from"))
+            && matches!(token(1), Some(Token::Ident(f)) if FileFormat::of_name(f).is_some())
+            && matches!(token(2), Some(Token::Text(_)))
+    }
+
+    /// `csv "FILE"`.
+    fn file_target(&mut self) -> Result<(FileFormat, String)> {
+        let format = match self.next() {
+            Token::Ident(f) if FileFormat::of_name(&f).is_some() => {
+                FileFormat::of_name(&f).expect("a format")
+            }
+            t => return self.syntax(format!("expected csv, tsv or jsonl, found {t}")),
+        };
+        match self.next() {
+            Token::Text(path) => Ok((format, path)),
+            t => self.syntax(format!("expected a quoted file name, found {t}")),
+        }
+    }
+
+    /// `csv "FILE" [( key: c, header: false, … )] [rows N]`.
+    fn file_source(&mut self) -> Result<FileSource> {
+        let (format, path) = self.file_target()?;
+        let mut source = FileSource {
+            format,
+            path,
+            kinds: Vec::new(),
+            header: true,
+            rows: None,
+        };
+        if self.punct("(") {
+            loop {
+                let word = match self.next() {
+                    Token::Ident(w) => w,
+                    t => return self.syntax(format!("expected a column kind, found {t}")),
+                };
+                self.expect(&Token::Punct(":"))?;
+                if word.eq_ignore_ascii_case("header") {
+                    source.header = match self.next() {
+                        Token::Keyword("true") => true,
+                        Token::Keyword("false") => false,
+                        t => return self.syntax(format!("expected true or false, found {t}")),
+                    };
+                } else {
+                    let Some(kind) = ColumnKind::of_name(&word) else {
+                        return self.syntax(format!(
+                            "expected key, id, value, number or header, found {word}"
+                        ));
+                    };
+                    let column = match self.next() {
+                        Token::Ident(c) | Token::Text(c) | Token::Number(c) | Token::Var(c) => c,
+                        Token::Param(c) => c,
+                        Token::Keyword(c) => c.to_string(),
+                        t => return self.syntax(format!("expected a column, found {t}")),
+                    };
+                    source.kinds.push((column, kind));
+                }
+                if !self.punct(",") {
+                    break;
+                }
+            }
+            self.expect(&Token::Punct(")"))?;
+        }
+        if self.word_follows("rows") {
+            self.next();
+            source.rows = Some(match self.next() {
+                Token::Number(n) => match n.parse() {
+                    Ok(n) => n,
+                    Err(_) => return self.syntax(format!("expected a count, found {n}")),
+                },
+                t => return self.syntax(format!("expected a count after 'rows', found {t}")),
+            });
+        }
+        Ok(source)
     }
 
     /// Whether the word `w` comes next.  `since` and `history` are not
@@ -4534,6 +4712,15 @@ pub enum Output {
     /// A `lookup`'s graph: the links its matches use (not those of its
     /// negations), and the entries they bind that aren't in those links.
     Graph(ResultGraph),
+    /// The rows of a file an `insert` or `delete` read, and the links it
+    /// changed.
+    Loaded {
+        insert: bool,
+        rows: usize,
+        links: usize,
+    },
+    /// The file a `select … into` wrote, and its rows.
+    Exported { path: String, rows: usize },
     /// The links an `insert` added.
     Inserted(usize),
     /// The links a `delete` deleted.
@@ -4778,11 +4965,13 @@ impl Statement {
                 template,
                 pattern,
                 graph,
+                ..
             }
             | Statement::Delete {
                 template,
                 pattern,
                 graph,
+                ..
             } => {
                 for t in template.iter_mut() {
                     bind_pattern(t, params)?;
@@ -4830,6 +5019,9 @@ impl Statement {
             }
             Statement::From { source, statement } => {
                 bind_graph(source, params)?;
+                **statement = statement.bind(params)?;
+            }
+            Statement::Export { statement, .. } => {
                 **statement = statement.bind(params)?;
             }
             Statement::Test { operands, .. } => {
@@ -4892,6 +5084,65 @@ pub struct Session {
     reading: Option<Arc<Overlay>>,
     /// The functions `function` defined: their parameters and bodies.
     functions: HashMap<String, (Vec<String>, Expr)>,
+    /// Whether statements may read and write files.
+    files: bool,
+}
+
+/// What can go wrong naming an entry from a file's field.
+enum CellError {
+    Bad(String),
+    Graph(graph::Error),
+}
+
+/// The entry a file's field names, or 0 if it names none and `insert` is
+/// false.
+fn cell_id(
+    g: &mut Graph,
+    text: &str,
+    kind: Option<ColumnKind>,
+    insert: bool,
+) -> std::result::Result<u64, CellError> {
+    let node = match kind {
+        None => match text.strip_prefix('#') {
+            Some(d) if !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()) => {
+                let id = d
+                    .parse()
+                    .map_err(|_| CellError::Bad(format!("{text} is too large")))?;
+                Node::Id(id)
+            }
+            _ if text.starts_with('/') => Node::Key(text.to_string()),
+            _ => Node::Value(text.to_string()),
+        },
+        Some(ColumnKind::Key) if text.starts_with('/') => Node::Key(text.to_string()),
+        Some(ColumnKind::Key) => Node::Key(format!("/{text}")),
+        Some(ColumnKind::Id) => match text.strip_prefix('#').unwrap_or(text).parse() {
+            Ok(id) => Node::Id(id),
+            Err(_) => return Err(CellError::Bad(format!("{text} is not an id"))),
+        },
+        Some(ColumnKind::Value) => Node::Value(text.to_string()),
+        Some(ColumnKind::Number) => {
+            if text.parse::<f64>().is_err() {
+                return Err(CellError::Bad(format!("{text} is not a number")));
+            }
+            Node::Value(text.to_string())
+        }
+    };
+    Ok(resolve(g, &node, insert)
+        .map_err(CellError::Graph)?
+        .unwrap_or(0))
+}
+
+/// An entry as text, as a file's field would name it.
+fn entry_text(g: &Graph, id: u64) -> String {
+    if let Some(key) = g.key(id)
+        && let Ok(key) = std::str::from_utf8(&key)
+    {
+        return key.to_string();
+    }
+    match g.data(id).as_deref().map(std::str::from_utf8) {
+        Some(Ok(text)) => text.to_string(),
+        _ => format!("#{id}"),
+    }
 }
 
 /// A result a `test` compares.
@@ -4963,6 +5214,14 @@ impl Session {
         params: &Params,
     ) -> Result<Output> {
         self.run(g, &statement.bind(params)?)
+    }
+
+    /// Allows the session's statements to read and write files, as `from
+    /// csv "FILE"` and `into csv "FILE"` do.  Off by default: a statement
+    /// runs with this process's access to the file system, so turn it on only
+    /// for statements you trust.
+    pub fn allow_files(&mut self, allow: bool) {
+        self.files = allow;
     }
 
     /// The session's author, set by `author`.
@@ -5399,6 +5658,16 @@ impl Session {
 
     /// Runs a parsed statement on `g`, which must have no parameters.
     pub fn run(&mut self, g: &mut Graph, statement: &Statement) -> Result<Output> {
+        if let Statement::Export {
+            format,
+            path,
+            statement,
+        } = statement
+        {
+            self.check_files()?;
+            let output = self.run(g, statement)?;
+            return self.export(g, *format, path, output);
+        }
         let statement = &self.prepared(g, statement)?;
         if statement.reads() {
             return self.run_reading(g, statement);
@@ -5576,18 +5845,30 @@ impl Session {
             | Statement::Verify { .. }
             | Statement::Lookup { .. }
             | Statement::From { .. }
+            | Statement::Export { .. }
             | Statement::Test { .. } => unreachable!("a statement that reads"),
             Statement::Insert {
                 template,
                 pattern,
                 graph,
+                source,
             }
             | Statement::Delete {
                 template,
                 pattern,
                 graph,
+                source,
             } => {
                 let insert = matches!(statement, Statement::Insert { .. });
+                if let Some(source) = source {
+                    if pattern.is_some() {
+                        return Err(Error::Invalid(
+                            "a file gives the rows: a template rule's conditions need a pattern"
+                                .into(),
+                        ));
+                    }
+                    return self.load(g, insert, template, graph.as_ref(), source);
+                }
                 if self.data.is_some() {
                     let (rows, _holds) = bindings(g, rules, pattern.as_ref(), view.as_ref())?;
                     let n = self.write_data(g, insert, template, graph.as_ref(), rows)?;
@@ -5636,92 +5917,8 @@ impl Session {
                 };
                 let mut count = 0;
                 let (rows, _holds) = bindings(g, rules, pattern.as_ref(), view.as_ref())?;
-                for row in rows {
-                    // A blank node of the template is a new node for each row,
-                    // and a link node's name is bound to its link.
-                    let mut blanks: HashMap<String, u64> = HashMap::new();
-                    for t in template {
-                        let (link, s, p, o, author, sg) = match t {
-                            Pattern::Triple(s, p, o) => (None, s, p, o, None, None),
-                            Pattern::Tagged(s, p, o, a, sg) => {
-                                (None, s, p, o, a.as_ref(), sg.as_ref())
-                            }
-                            Pattern::Link(l, s, p, o) => (Some(l), s, p, o, None, None),
-                            _ => unreachable!("a template is triples and links"),
-                        };
-                        let mut id = |g: &mut Graph, n: &Node| -> graph::Result<Option<u64>> {
-                            Ok(match n {
-                                Node::Var(v) | Node::Blank(v) if blanks.contains_key(v) => {
-                                    Some(blanks[v])
-                                }
-                                // Unbound, from an optional pattern: the
-                                // triple is left out.  A value computed (a
-                                // count, a rank) is written as a value, if
-                                // inserted.
-                                Node::Var(v) | Node::Blank(v) if row.contains_key(v) => {
-                                    match row[v] {
-                                        0 => None,
-                                        id if id & graph::EPHEMERAL != 0 => {
-                                            let data = g.data(id).map(Cow::into_owned);
-                                            let key = g.key(id).map(Cow::into_owned);
-                                            match (data, key) {
-                                                (Some(d), _) if insert => Some(g.value(&d)?),
-                                                (_, Some(k)) if insert => {
-                                                    Some(g.node_by_key(&k)?)
-                                                }
-                                                // A node of an overlay isn't
-                                                // the database's.
-                                                _ => None,
-                                            }
-                                        }
-                                        id => Some(id),
-                                    }
-                                }
-                                Node::Var(_) => None,
-                                Node::Blank(b) if insert => Some(match blanks.get(b) {
-                                    Some(&id) => id,
-                                    None => {
-                                        let id = g.node()?;
-                                        blanks.insert(b.clone(), id);
-                                        id
-                                    }
-                                }),
-                                Node::Blank(_) => None,
-                                n => resolve(g, n, insert)?,
-                            })
-                        };
-                        // Deleting a link to a constant not in the graph does nothing.
-                        let (Some(s), Some(p), Some(o)) = (id(g, s)?, id(g, p)?, id(g, o)?) else {
-                            continue;
-                        };
-                        let author = match author {
-                            Some(a) => id(g, a)?,
-                            None => None,
-                        };
-                        let sg = match sg {
-                            Some(n) => Some(id(g, n)?.unwrap_or(0)),
-                            None => statement_graph,
-                        };
-                        let id = if insert {
-                            let sg = sg.or(self.subgraph);
-                            let changed = self.add_fact(g, (s, p, o), author, sg)?;
-                            count += usize::from(changed);
-                            g.find_link(s, p, o)
-                        } else {
-                            let live = g.find_link(s, p, o);
-                            let removed = match sg {
-                                // Out of a subgraph not in the graph: nothing.
-                                Some(0) => false,
-                                Some(sg) => g.remove_from_subgraph(s, p, o, sg)?.is_some(),
-                                None => g.delete_link(s, p, o)?.is_some(),
-                            };
-                            count += usize::from(removed);
-                            live
-                        };
-                        if let (Some(Node::Var(name) | Node::Blank(name)), Some(id)) = (link, id) {
-                            blanks.insert(name.clone(), id);
-                        }
-                    }
+                for row in &rows {
+                    count += self.apply_template(g, insert, template, row, statement_graph)?;
                 }
                 Ok(if insert {
                     Output::Inserted(count)
@@ -5734,6 +5931,240 @@ impl Session {
 }
 
 impl Session {
+    /// Inserts (or deletes) the template's triples for the row `row`,
+    /// returning the number of links changed.
+    fn apply_template(
+        &mut self,
+        g: &mut Graph,
+        insert: bool,
+        template: &[Pattern],
+        row: &HashMap<String, u64>,
+        statement_graph: Option<u64>,
+    ) -> Result<usize> {
+        let mut count = 0;
+        // A blank node of the template is a new node for each row, and a
+        // link node's name is bound to its link.
+        let mut blanks: HashMap<String, u64> = HashMap::new();
+        for t in template {
+            let (link, s, p, o, author, sg) = match t {
+                Pattern::Triple(s, p, o) => (None, s, p, o, None, None),
+                Pattern::Tagged(s, p, o, a, sg) => (None, s, p, o, a.as_ref(), sg.as_ref()),
+                Pattern::Link(l, s, p, o) => (Some(l), s, p, o, None, None),
+                _ => unreachable!("a template is triples and links"),
+            };
+            let mut id = |g: &mut Graph, n: &Node| -> graph::Result<Option<u64>> {
+                Ok(match n {
+                    Node::Var(v) | Node::Blank(v) if blanks.contains_key(v) => Some(blanks[v]),
+                    // Unbound, from an optional pattern: the
+                    // triple is left out.  A value computed (a
+                    // count, a rank) is written as a value, if
+                    // inserted.
+                    Node::Var(v) | Node::Blank(v) if row.contains_key(v) => {
+                        match row[v] {
+                            0 => None,
+                            id if id & graph::EPHEMERAL != 0 => {
+                                let data = g.data(id).map(Cow::into_owned);
+                                let key = g.key(id).map(Cow::into_owned);
+                                match (data, key) {
+                                    (Some(d), _) if insert => Some(g.value(&d)?),
+                                    (_, Some(k)) if insert => Some(g.node_by_key(&k)?),
+                                    // A node of an overlay isn't
+                                    // the database's.
+                                    _ => None,
+                                }
+                            }
+                            id => Some(id),
+                        }
+                    }
+                    Node::Var(_) => None,
+                    Node::Blank(b) if insert => Some(match blanks.get(b) {
+                        Some(&id) => id,
+                        None => {
+                            let id = g.node()?;
+                            blanks.insert(b.clone(), id);
+                            id
+                        }
+                    }),
+                    Node::Blank(_) => None,
+                    n => resolve(g, n, insert)?,
+                })
+            };
+            // Deleting a link to a constant not in the graph does nothing.
+            let (Some(s), Some(p), Some(o)) = (id(g, s)?, id(g, p)?, id(g, o)?) else {
+                continue;
+            };
+            let author = match author {
+                Some(a) => id(g, a)?,
+                None => None,
+            };
+            let sg = match sg {
+                Some(n) => Some(id(g, n)?.unwrap_or(0)),
+                None => statement_graph,
+            };
+            let id = if insert {
+                let sg = sg.or(self.subgraph);
+                let changed = self.add_fact(g, (s, p, o), author, sg)?;
+                count += usize::from(changed);
+                g.find_link(s, p, o)
+            } else {
+                let live = g.find_link(s, p, o);
+                let removed = match sg {
+                    // Out of a subgraph not in the graph: nothing.
+                    Some(0) => false,
+                    Some(sg) => g.remove_from_subgraph(s, p, o, sg)?.is_some(),
+                    None => g.delete_link(s, p, o)?.is_some(),
+                };
+                count += usize::from(removed);
+                live
+            };
+            if let (Some(Node::Var(name) | Node::Blank(name)), Some(id)) = (link, id) {
+                blanks.insert(name.clone(), id);
+            }
+        }
+        Ok(count)
+    }
+
+    /// Runs the template for each record of `source`.
+    fn load(
+        &mut self,
+        g: &mut Graph,
+        insert: bool,
+        template: &[Pattern],
+        graph: Option<&Node>,
+        source: &FileSource,
+    ) -> Result<Output> {
+        self.check_files()?;
+        if self.data.is_some() {
+            return Err(Error::Invalid(
+                "a file can't be loaded into a data graph".into(),
+            ));
+        }
+        let mut records = files::Records::open(&source.path, source.format, source.header)?;
+        let named: BTreeSet<&String> = template
+            .iter()
+            .filter_map(|t| match t {
+                Pattern::Link(Node::Var(v), ..) => Some(v),
+                _ => None,
+            })
+            .collect();
+        let mut columns: BTreeSet<String> = BTreeSet::new();
+        for t in template {
+            print::each_node(t, &mut |n| {
+                if let Node::Var(v) = n
+                    && !named.contains(v)
+                {
+                    columns.insert(v.clone());
+                }
+            });
+        }
+        for c in columns.iter().chain(source.kinds.iter().map(|(c, _)| c)) {
+            if !records.has_column(c) {
+                return Err(Error::Invalid(format!(
+                    "{}: no column {c}: the file has {}",
+                    source.path,
+                    records.column_names()
+                )));
+            }
+        }
+        let columns: Vec<(String, Option<ColumnKind>)> = columns
+            .into_iter()
+            .map(|c| {
+                let kind = source.kinds.iter().find(|(k, _)| *k == c).map(|(_, k)| *k);
+                (c, kind)
+            })
+            .collect();
+        let statement_graph = match graph {
+            Some(n) => resolve(g, n, insert)?.or(Some(0)),
+            None => None,
+        };
+        // Sizing is for an empty graph, so read the file for it only then.
+        if insert && g.next_id() == g.start_id() {
+            let rows = match source.rows {
+                Some(n) => n,
+                None => files::count_lines(&source.path)?,
+            };
+            // Each triple is a link and about a new node or value.
+            g.presize(rows.saturating_mul(2 * template.len() as u64 + 1))?;
+        }
+        let (mut rows, mut count) = (0, 0);
+        let mut row: HashMap<String, u64> = HashMap::with_capacity(columns.len());
+        while let Some(record) = records.next_record()? {
+            for (column, kind) in &columns {
+                let id = match records.field(&record, column) {
+                    Some(text) => cell_id(g, text, *kind, insert).map_err(|e| match e {
+                        CellError::Bad(what) => Error::Invalid(format!(
+                            "{}:{}: column {column}: {what}",
+                            source.path,
+                            records.line()
+                        )),
+                        CellError::Graph(e) => e.into(),
+                    })?,
+                    None => 0,
+                };
+                match row.get_mut(column) {
+                    Some(slot) => *slot = id,
+                    None => {
+                        row.insert(column.clone(), id);
+                    }
+                }
+            }
+            count += self.apply_template(g, insert, template, &row, statement_graph)?;
+            rows += 1;
+        }
+        Ok(Output::Loaded {
+            insert,
+            rows,
+            links: count,
+        })
+    }
+
+    /// Fails unless the session may read and write files.
+    fn check_files(&self) -> Result<()> {
+        if self.files {
+            Ok(())
+        } else {
+            Err(Error::Invalid(
+                "this session may not read or write files: see Session::allow_files".into(),
+            ))
+        }
+    }
+
+    /// Writes the rows `output` holds to `path`.
+    fn export(&self, g: &Graph, format: FileFormat, path: &str, output: Output) -> Result<Output> {
+        let text = |c: &Cell| match c {
+            Cell::Id(0) | Cell::Unbound => None,
+            Cell::Id(id) => Some(entry_text(g, *id)),
+            c => c.data(g).map(|d| String::from_utf8_lossy(&d).into_owned()),
+        };
+        let rows = match output {
+            Output::Rows { vars, rows, .. } => files::write_rows(
+                path,
+                format,
+                &vars,
+                rows.iter().map(|r| {
+                    r.iter()
+                        .map(|&id| (id != 0).then(|| entry_text(g, id)))
+                        .collect()
+                }),
+            )?,
+            Output::Table { vars, rows, .. } => files::write_rows(
+                path,
+                format,
+                &vars,
+                rows.iter().map(|r| r.iter().map(text).collect()),
+            )?,
+            _ => {
+                return Err(Error::Invalid(
+                    "only a select can be written to a file".into(),
+                ));
+            }
+        };
+        Ok(Output::Exported {
+            path: path.to_string(),
+            rows,
+        })
+    }
+
     /// Inserts (or deletes) the template's triples for each of `rows` into
     /// the data graph, an overlay: its constants and blank nodes ephemeral
     /// if not in the graph.  Returns the number of links changed.
@@ -5899,11 +6330,13 @@ fn each_statement_node(statement: &mut Statement, f: &mut impl FnMut(&mut Node))
             template,
             pattern,
             graph: g,
+            ..
         }
         | Statement::Delete {
             template,
             pattern,
             graph: g,
+            ..
         } => {
             template.iter_mut().for_each(|t| print::each_node_mut(t, f));
             if let Some(p) = pattern {
@@ -5944,6 +6377,9 @@ fn each_statement_node(statement: &mut Statement, f: &mut impl FnMut(&mut Node))
         }
         Statement::From { source, statement } => {
             graph(source, f);
+            each_statement_node(statement, f);
+        }
+        Statement::Export { statement, .. } => {
             each_statement_node(statement, f);
         }
         Statement::Test { operands, .. } => {
@@ -6031,6 +6467,9 @@ fn each_statement_expr(statement: &mut Statement, f: &mut impl FnMut(&mut Expr))
         | Statement::Default(e) => graph(e, f),
         Statement::From { source, statement } => {
             graph(source, f);
+            each_statement_expr(statement, f);
+        }
+        Statement::Export { statement, .. } => {
             each_statement_expr(statement, f);
         }
         Statement::Test { operands, .. } => {
@@ -6163,11 +6602,13 @@ fn each_statement_key(statement: &mut Statement, f: &mut impl FnMut(&mut String)
             template,
             pattern: p,
             graph,
+            ..
         }
         | Statement::Delete {
             template,
             pattern: p,
             graph,
+            ..
         } => {
             template.iter_mut().for_each(|t| pattern(t, f));
             if let Some(p) = p {
@@ -6196,6 +6637,9 @@ fn each_statement_key(statement: &mut Statement, f: &mut impl FnMut(&mut String)
         }
         Statement::From { source, statement } => {
             each_graph_key(source, f);
+            each_statement_key(statement, f);
+        }
+        Statement::Export { statement, .. } => {
             each_statement_key(statement, f);
         }
         Statement::Test { operands, .. } => {
@@ -6246,6 +6690,8 @@ pub fn execute(g: &mut Graph, text: &str) -> Result<Vec<Output>> {
 }
 
 mod expr;
+mod files;
+pub use files::FileFormat;
 mod prepared;
 mod print;
 mod saved;
@@ -6253,7 +6699,7 @@ mod saved;
 mod tests;
 
 pub use prepared::PreparedStatement;
-pub use print::literal;
+pub use print::{literal, quoted};
 use saved::Saved;
 pub use saved::{
     CALLS_PREDICATE, REFERS_TO_KEY_PREDICATE, RULE_PREDICATE, RULES_KEY, SkippedRule,
