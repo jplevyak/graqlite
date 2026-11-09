@@ -292,7 +292,13 @@ have any predicate.)
   `delete` with templates and `where`, `rule` / `delete rule`, `index vector
   on P dims N` / `delete index vector on P`, `insert graph G`, `maintain`, `author` and `subgraph`, `set`, `data`, `default`,
   `assume`, `function` and `test`, each query optionally `as of` an id or an
-  ISO 8601 time.
+  ISO 8601 time. A `select`, or any `( group )`, can also say `since` an id or
+  a time (only links appended after it; a window, with `as of`) and `history`
+  (every link of each fact, live or dead, oldest first, which `state(?l)` says
+  is `live` or `dead`).  The two can't apply to paths, rule calls or searches,
+  a result graph or an assumption, and `verify` and `lookup` take them on a
+  group.  `history` needs the links compaction drops, so it fails before the
+  horizon, like `as of`.
 - **Patterns** in Turtle's style (`;`, `,`, `.`), blank nodes (`[ … ]`,
   `_:x`), `/keys`, `#ids`, `$params`, `and`, `or`, `not`, `optional ( … )` and
   the `-` modifier, comparisons and expressions (`let ?t = ?p * ?q . ?t >

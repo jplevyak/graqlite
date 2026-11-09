@@ -198,13 +198,13 @@ fn fragile(g: &Graph, p: &Pattern) -> bool {
     missing || fragile_paths(g, p)
 }
 
-/// Whether `p` has an `as of` a time, or a path expression naming a
+/// Whether `p` has an `as of` or `since` a time, or a path expression naming a
 /// predicate not in `g`.
 fn fragile_paths(g: &Graph, p: &Pattern) -> bool {
     match p {
-        Pattern::AsOf(_, AsOf::Time(_)) => true,
+        Pattern::Window(_, w) if w.is_timed() => true,
         Pattern::PathExpr(_, path, _) => missing_predicate(g, path),
-        Pattern::AsOf(p, _) | Pattern::Not(p) | Pattern::Optional(p) => fragile_paths(g, p),
+        Pattern::Window(p, _) | Pattern::Not(p) | Pattern::Optional(p) => fragile_paths(g, p),
         Pattern::And(ps) | Pattern::Or(ps) => ps.iter().any(|p| fragile_paths(g, p)),
         _ => false,
     }

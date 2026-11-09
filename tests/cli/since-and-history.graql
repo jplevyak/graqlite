@@ -1,0 +1,37 @@
+-- `since` and `history`, at the statement and on a group.
+insert /ann knows /ben , /cat
+
+delete /ann knows /cat
+
+insert /ann knows /cat , /dan
+
+\ids
+select ?l, ?who, state(?l) history where << :?l /ann knows ?who >>
+\ids
+
+select ?who, state(?l) since 80 history where << :?l /ann knows ?who >>
+
+-- A live link older than `since` isn't matched.
+select ?who since 80 where /ann knows ?who
+
+-- A window, in either order.
+select ?who as of 95 since 70 where /ann knows ?who
+
+select ?who since 70 as of 95 where /ann knows ?who
+
+-- On a group, beside what is live now.
+select ?who where ( /ann knows ?who ) history and not ( /ann knows ?who )
+
+verify ( /ann knows /ben ) since 80
+
+verify ( /ann knows /ben ) history
+
+select ?who since "2000-01-01" where /ann knows ?who
+
+-- Neither is a keyword: they name predicates as before.
+insert /ann since 2019 ; history "long"
+
+select ?y, ?h where /ann since ?y ; history ?h
+
+-- state() of what isn't a link.
+select state(?x) where /ann knows ?x limit 1

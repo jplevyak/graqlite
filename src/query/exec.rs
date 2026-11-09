@@ -14,7 +14,7 @@ use super::compute;
 use super::overlay::{self, Shared};
 use super::plan::{Access, GroupPlan, Join, Plan, Step};
 use super::provenance::{Recorder, RowProvenance, Support, witness};
-use super::reduce::{Link, live_links};
+use super::reduce::{Link, live_links_since};
 use super::result::{Derivation, ResultGraph, ResultLink, ResultNode};
 use super::rules::{self, Relations, Tuples};
 use super::{
@@ -599,6 +599,10 @@ struct Matcher {
     /// Whether each variable is bound in the rows given.
     bound: Vec<bool>,
     as_of: Option<u64>,
+    /// Links at or before this id are not matched.
+    since: Option<u64>,
+    /// Whether every link matches, not only each fact's latest live one.
+    history: bool,
     /// The overlay read over the database, if any.
     overlay: Option<Shared>,
     /// The pattern's reduced links, used in place of the indexes, and an
@@ -625,6 +629,14 @@ struct LinkStream {
 }
 
 impl Matcher {
+    /// The lowest and highest ids the pattern can match.
+    fn window(&self) -> (u64, u64) {
+        (
+            self.since.map_or(0, |s| s.saturating_add(1)),
+            self.as_of.unwrap_or(u64::MAX),
+        )
+    }
+
     /// The index entry a lookup for `row` reads, if it is one entry with every
     /// link of each subject, predicate and object in it.
     fn link_key(&self, row: &[u64]) -> Option<LinkKey> {
@@ -880,12 +892,21 @@ impl Lookup for Matcher {
             Vec::new()
         } else if self.reduced.is_some() {
             self.reduced_links(row)
+        } else if self.history {
+            let (low, high) = self.window();
+            self.candidates(g, row)
+                .range(low..=high)
+                .filter_map(|&id| {
+                    let f = g.get(id).ok()?.as_link()?.fields();
+                    Some((id, [f.subject, f.predicate, f.object]))
+                })
+                .collect()
         } else if matches!(self.access, Access::Graph | Access::Author) {
             // The entry isn't every link of its facts: each link must be
             // its fact's latest.
-            let as_of = self.as_of.unwrap_or(u64::MAX);
+            let (low, as_of) = self.window();
             self.candidates(g, row)
-                .range(..=as_of)
+                .range(low..=as_of)
                 .filter_map(|&id| {
                     let f = g.get(id).ok()?.as_link()?.fields();
                     let (latest, _) =
@@ -895,7 +916,7 @@ impl Lookup for Matcher {
                 })
                 .collect()
         } else {
-            live_links(g, &self.candidates(g, row), self.as_of)
+            live_links_since(g, &self.candidates(g, row), self.as_of, self.since)
         };
         let live = match &self.overlay {
             None => live,
@@ -924,7 +945,9 @@ impl Lookup for Matcher {
     /// Streams a large index entry, newest first from the `as of` cutoff;
     /// matches others at once, as [`matches`](Lookup::matches) does.
     fn begin(&mut self, g: &Graph, row: &[u64], out: &mut Batch) -> Result<bool> {
-        let key = if self.reduced.is_none() && self.overlay.is_none() {
+        // `history` reads the entry oldest first, so isn't streamed from
+        // its newest.
+        let key = if self.reduced.is_none() && self.overlay.is_none() && !self.history {
             self.link_key(row)
         } else {
             None
@@ -952,6 +975,9 @@ impl Lookup for Matcher {
         live.clear();
         seen.clear();
         for id in ids {
+            if self.since.is_some_and(|s| id <= s) {
+                break;
+            }
             let Ok(record) = g.get(id) else { continue };
             let Some(link) = record.as_link() else {
                 continue;
@@ -978,7 +1004,11 @@ impl Lookup for Matcher {
         };
         let mut new = Vec::with_capacity(row.len());
         while !out.is_full() {
-            let Some(id) = stream.ids.next() else {
+            let Some(id) = stream
+                .ids
+                .next()
+                .filter(|&id| self.since.is_none_or(|s| id > s))
+            else {
                 return Ok(true);
             };
             let Ok(record) = g.get(id) else { continue };
@@ -1643,6 +1673,9 @@ struct Context {
     width: usize,
     /// The query's `as_of`.
     as_of: Option<u64>,
+    /// The query's `since` and `history`.
+    since: Option<u64>,
+    history: bool,
     /// Whether to use the reduction: whether the graph is as it was planned.
     reduced: bool,
     /// The relations evaluated again, if the graph has changed since
@@ -1735,6 +1768,8 @@ impl Context {
                             access,
                             bound: bound.to_vec(),
                             as_of: pattern.as_of.or(self.as_of),
+                            since: pattern.since.or(self.since),
+                            history: pattern.history || self.history,
                             overlay: self.overlay.clone(),
                             reduced: reduced.clone(),
                             index: None,
@@ -2133,6 +2168,12 @@ impl Plan {
     /// deduplicated, ordered or limited, with `values` as the values of its
     /// parameters.
     fn matched(&self, g: &Graph, values: Given, overlay: Option<&Shared>) -> Result<Matched> {
+        // An overlay's links have no place in the log's order.
+        if overlay.is_some() && self.query.uses_window() {
+            return Err(Error::InvalidArgument(
+                "'since' and 'history' read the log, not a result graph or an assumption",
+            ));
+        }
         let q = &self.query;
         if values.len() != q.params.len() {
             return Err(Error::InvalidArgument(
@@ -2180,6 +2221,8 @@ impl Plan {
             overlay: overlay.cloned(),
             width,
             as_of: q.as_of,
+            since: q.since,
+            history: q.history,
             reduced: unchanged,
             relations,
             start: start.clone(),

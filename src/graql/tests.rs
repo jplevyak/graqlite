@@ -469,7 +469,7 @@ fn flat(p: &Pattern) -> Pattern {
         Pattern::And(ps) => group(ps, false),
         Pattern::Or(ps) => group(ps, true),
         Pattern::Not(q) => Pattern::Not(Box::new(flat(q))),
-        Pattern::AsOf(q, id) => Pattern::AsOf(Box::new(flat(q)), *id),
+        Pattern::Window(q, id) => Pattern::Window(Box::new(flat(q)), *id),
         Pattern::Optional(q) => Pattern::Optional(Box::new(flat(q))),
         p => p.clone(),
     }
@@ -530,7 +530,7 @@ fn rename_blanks(p: &mut Pattern, names: &mut HashMap<String, String>) {
         Pattern::And(ps) | Pattern::Or(ps) | Pattern::Assert(ps, _) => {
             ps.iter_mut().for_each(|p| rename_blanks(p, names))
         }
-        Pattern::Not(p) | Pattern::AsOf(p, _) | Pattern::Optional(p) => rename_blanks(p, names),
+        Pattern::Not(p) | Pattern::Window(p, _) | Pattern::Optional(p) => rename_blanks(p, names),
     }
 }
 
@@ -3583,4 +3583,46 @@ fn nested_limits_apply_before_aggregating() {
     };
     assert_eq!(rows.len(), 1);
     assert!(matches!(rows[0][0], Cell::Int(2)), "{rows:?}");
+}
+
+#[test]
+fn since_and_history_errors() {
+    let mut g = graph();
+    one(&mut g, "insert /ann knows /ben");
+    one(&mut g, "rule r(?x) /ann knows ?x");
+    for (text, message) in [
+        ("select ?w since where /ann knows ?w", "after 'since'"),
+        ("select ?w since 1 since 2 where /ann knows ?w", "twice"),
+        ("select ?w history history where /ann knows ?w", "twice"),
+        ("select ?w as of 1 as of 2 where /ann knows ?w", "twice"),
+        ("select ?w since 1 where /ann (knows+) ?w", "a path"),
+        ("select ?w where ( /ann (knows+) ?w ) history", "a path"),
+        ("select ?x since 1 where r(?x)", "can't be called"),
+        ("lookup ( /ann knows ?w ) history", "history"),
+    ] {
+        let e = match Session::new().execute(&mut g, text) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("{text} succeeded"),
+        };
+        assert!(e.contains(message), "{text}: {e}");
+    }
+    // A one-step path is a pattern.
+    one(&mut g, "select ?w since 1 where /ann knows ?w");
+    // `lookup` may be `since`: what it returns is live.
+    one(&mut g, "lookup ( /ann knows ?w ) since 1");
+}
+
+#[test]
+fn since_and_history_print() {
+    for text in [
+        "select ?w where ( /a b ?w ) as of 5 since 2 history",
+        "select ?w where ( /a b ?w ) since \"2026-01-01T00:00:00Z\"",
+    ] {
+        let printed = parse(text).unwrap()[0].to_string();
+        assert_eq!(printed, parse(&printed).unwrap()[0].to_string());
+        assert!(printed.contains("since"), "{printed}");
+    }
+    let printed = parse("select ?w as of 9 since 2 history where /a b ?w").unwrap()[0].to_string();
+    assert!(printed.contains("as of 9"), "{printed}");
+    assert!(printed.contains("since 2 history"), "{printed}");
 }

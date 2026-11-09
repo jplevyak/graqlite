@@ -1,0 +1,53 @@
+INSERT 2
+DELETE 1
+INSERT 2
+showing ids is on
+ l    | who       | state(?l)
+------+-----------+-----------
+ #58  | /ben #39  | live
+ #90  | /cat #71  | live
+ #103 | /cat #71  | dead
+ #116 | /cat #71  | live
+ #148 | /dan #129 | live
+(5 rows)
+showing ids is off
+ who  | state(?l)
+------+-----------
+ /cat | live
+ /cat | dead
+ /cat | live
+ /dan | live
+(4 rows)
+ who
+------
+ /cat
+ /dan
+(2 rows)
+ who
+------
+ /cat
+(1 row)
+ who
+------
+ /cat
+(1 row)
+ who
+-----
+(0 rows)
+false
+true
+ who
+------
+ /ben
+ /cat
+ /dan
+(3 rows)
+INSERT 2
+ y    | h
+------+------
+ 2019 | long
+(1 row)
+ state(?x)
+-----------
+
+(1 row)

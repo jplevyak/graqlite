@@ -61,10 +61,22 @@ const MAX_PAIRS: u64 = 4096;
 /// every link of each subject, predicate and object it holds; ids that are
 /// not links are skipped.
 pub(crate) fn live_links(g: &Graph, candidates: &IdSet, as_of: Option<u64>) -> Vec<Link> {
+    live_links_since(g, candidates, as_of, None)
+}
+
+/// The same, of the links appended after `since`.  A fact's latest link is
+/// the newest of them, if it has any there, so nothing older need be read.
+pub(crate) fn live_links_since(
+    g: &Graph,
+    candidates: &IdSet,
+    as_of: Option<u64>,
+    since: Option<u64>,
+) -> Vec<Link> {
     // Newest first, the first link seen of a fact is its latest.
     let mut seen = crate::graph::Facts::with_capacity(candidates.len());
     let mut live: Vec<Link> = Vec::new();
-    for &id in candidates.range(..=as_of.unwrap_or(u64::MAX)).rev() {
+    let low = since.map_or(0, |s| s.saturating_add(1));
+    for &id in candidates.range(low..=as_of.unwrap_or(u64::MAX)).rev() {
         let Ok(record) = g.get(id) else { continue };
         if let Some(link) = record.as_link() {
             let spo = [link.subject(), link.predicate(), link.object()];
@@ -128,6 +140,7 @@ struct Reducer<'a> {
     g: &'a Graph,
     group: &'a Group,
     as_of: Option<u64>,
+    since: Option<u64>,
     budget: u64,
     entries: u64,
     vars: Vec<Option<IdSet>>,
@@ -261,6 +274,7 @@ impl Reducer<'_> {
     fn evaluate(&mut self, p: &Pattern) -> Option<Vec<Link>> {
         let g = self.g;
         let as_of = p.as_of.or(self.as_of);
+        let since = p.since.or(self.since);
         let mut ids = IdSet::new();
         let [s, pr, o] = p.terms().map(|t| self.known(t));
         match self.route(p).map(|(_, r)| r) {
@@ -319,7 +333,7 @@ impl Reducer<'_> {
                 }
             }
         }
-        let mut links = live_links(g, &ids, as_of);
+        let mut links = live_links_since(g, &ids, as_of, since);
         links.retain(|l| self.matches(p, l));
         Some(links)
     }
@@ -431,6 +445,7 @@ pub(crate) fn reduce(
     group: &Group,
     width: usize,
     as_of: Option<u64>,
+    since: Option<u64>,
     budget: u64,
     preset: &HashMap<usize, Vec<Link>>,
 ) -> Reduction {
@@ -445,6 +460,7 @@ pub(crate) fn reduce(
         g,
         group,
         as_of,
+        since,
         budget,
         entries: 0,
         vars: vec![None; width],

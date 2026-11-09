@@ -359,6 +359,12 @@ impl Plan {
         if let Some(id) = q.as_of {
             let _ = writeln!(out, "as of {id}");
         }
+        if let Some(id) = q.since {
+            let _ = writeln!(out, "since {id}");
+        }
+        if q.history {
+            let _ = writeln!(out, "history");
+        }
         out
     }
 }
@@ -1479,7 +1485,9 @@ pub(crate) fn plan_full(
     // Nor can a query with parameters be reduced: their entries are unknown.
     // Nor one restricting its links' subgraphs or authors, which reduction
     // doesn't know.
-    let may_reduce = budget > 0
+    // Reducing keeps each fact's latest live link, and `history` needs all.
+    let may_reduce = !q.uses_history()
+        && budget > 0
         && q.root.patterns.len() >= 2
         && !stops_early
         && q.params.is_empty()
@@ -1514,8 +1522,11 @@ pub(crate) fn plan_full(
     let (root, reduction) = match planned {
         Some(plan) => (plan, None),
         None => {
-            let reduction = may_reduce
-                .then(|| Arc::new(reduce::reduce(g, &q.root, width, q.as_of, budget, &preset)));
+            let reduction = may_reduce.then(|| {
+                Arc::new(reduce::reduce(
+                    g, &q.root, width, q.as_of, q.since, budget, &preset,
+                ))
+            });
             let plan = new_planner(reduction.clone())
                 .plan_group(&q.root, &params)
                 .ok_or_else(unplannable)?;

@@ -7,7 +7,10 @@ patterns, aggregates, path expressions, parameters and expressions. Beyond
 those, it has three things that none of the four has built in: **recursive
 rules saved in the database**, **history** (every query can see the graph
 as of an id or a time), and **statements about statements** as part of
-the data model.
+the data model. **Datomic**, in the table's last column, is the nearest
+relative: it has Datalog rules (passed with each query, not saved) and the
+same three views of the past, but its facts are about entities and need a
+schema, and a statement about a fact is an attribute of its transaction.
 
 The GraQL queries below are in
 [`examples/13-comparison.graql`](../examples/13-comparison.graql), which the
@@ -18,25 +21,25 @@ are triples.
 
 ## At a glance
 
-| | GraQL | GQL (ISO 2024) | Cypher | SPARQL 1.1 | Gremlin |
-|---|---|---|---|---|---|
-| Model | triples; links are entries with ids, and links can be about links | property graph | property graph | RDF triples, named graphs | property graph |
-| Style | declarative, Turtle-like | declarative, ASCII-art patterns | declarative, ASCII-art | declarative, Turtle-like | traversal steps |
-| Planner | cost-based, with constraint propagation | per engine | cost-based | per engine | mostly as written |
-| Optional | `optional ( … )`, `-` | `OPTIONAL MATCH` | `OPTIONAL MATCH` | `OPTIONAL` | `optional()`, `coalesce()` |
-| Negation | `not` | `NOT EXISTS` | `WHERE NOT` | `FILTER NOT EXISTS`, `MINUS` | `not()` |
-| Aggregates | `count sum avg min max sample`, implicit grouping, `having` | ✓ | ✓, implicit grouping | `GROUP BY`, `HAVING` | `group()`, `count()` |
-| Paths | `^p`, `p / q`, `p \| q`, `* + {m,n}` | quantifiers, path modes, shortest | `*m..n`, `shortestPath` | `^p / \| * + ?` | `repeat()`, `path()` |
-| Path as a value | ✗ | ✓ | ✓ | ✗ | ✓ |
-| Recursive rules | ✓ saved Datalog, stratified negation | ✗ | ✗ | ✗ (a reasoner) | ✗ (loops) |
-| Expressions | arithmetic, text, time functions; `let` | ✓ | ✓ | `BIND`, functions | `math()`, steps |
-| Parameters | `$name` | ✓ | `$name` | `VALUES` | bindings |
-| Paging | `by … desc`, `limit`, `offset` | ✓ | `ORDER BY`, `SKIP`, `LIMIT` | `ORDER BY`, `LIMIT`, `OFFSET` | `order()`, `range()` |
-| Statements about links | `<< s p o >>`, native | edge properties | edge properties | RDF-star (RDF 1.2) | edge properties |
-| History, as of | `as of` an id or a time | ✗ | ✗ | ✗ | ✗ |
-| Live queries | engine `StandingQuery` | ✗ | ✗ | ✗ | ✗ |
-| Literal types | untyped storage, typed computation | typed | typed | XSD datatypes, language tags | typed |
-| Schema | ✗ | graph types | constraints | SHACL, OWL | ✗ |
+| | GraQL | GQL (ISO 2024) | Cypher | SPARQL 1.1 | Gremlin | Datomic |
+|---|---|---|---|---|---|---|
+| Model | triples; links are entries with ids, and links can be about links | property graph | property graph | RDF triples, named graphs | property graph | datoms: entity, attribute, value, transaction, added |
+| Style | declarative, Turtle-like | declarative, ASCII-art patterns | declarative, ASCII-art | declarative, Turtle-like | traversal steps | declarative Datalog, in EDN; `pull` |
+| Planner | cost-based, with constraint propagation | per engine | cost-based | per engine | mostly as written | clauses as written |
+| Optional | `optional ( … )`, `-` | `OPTIONAL MATCH` | `OPTIONAL MATCH` | `OPTIONAL` | `optional()`, `coalesce()` | `get-else`, `pull` |
+| Negation | `not` | `NOT EXISTS` | `WHERE NOT` | `FILTER NOT EXISTS`, `MINUS` | `not()` | `not`, `not-join` |
+| Aggregates | `count sum avg min max sample`, implicit grouping, `having` | ✓ | ✓, implicit grouping | `GROUP BY`, `HAVING` | `group()`, `count()` | `count sum avg min max sample`, implicit grouping, `:with` |
+| Paths | `^p`, `p / q`, `p \| q`, `* + {m,n}` | quantifiers, path modes, shortest | `*m..n`, `shortestPath` | `^p / \| * + ?` | `repeat()`, `path()` | recursive rules, recursive `pull` |
+| Path as a value | ✗ | ✓ | ✓ | ✗ | ✓ | ✗ |
+| Recursive rules | ✓ saved Datalog, stratified negation | ✗ | ✗ | ✗ (a reasoner) | ✗ (loops) | ✓ passed with each query |
+| Expressions | arithmetic, text, time functions; `let` | ✓ | ✓ | `BIND`, functions | `math()`, steps | predicates, functions, host-language calls |
+| Parameters | `$name` | ✓ | `$name` | `VALUES` | bindings | `:in` |
+| Paging | `by … desc`, `limit`, `offset` | ✓ | `ORDER BY`, `SKIP`, `LIMIT` | `ORDER BY`, `LIMIT`, `OFFSET` | `order()`, `range()` | `:limit`, `:offset` (client API), no order |
+| Statements about links | `<< s p o >>`, native | edge properties | edge properties | RDF-star (RDF 1.2) | edge properties | attributes of the transaction |
+| History | `as of`, `since`, `history`, by id or time | ✗ | ✗ | ✗ | ✗ | `as-of`, `since`, `history` |
+| Live queries | engine `StandingQuery` | ✗ | ✗ | ✗ | ✗ | `tx-report-queue`, of transactions |
+| Literal types | untyped storage, typed computation | typed | typed | XSD datatypes, language tags | typed | typed attributes |
+| Schema | ✗ | graph types | constraints | SHACL, OWL | ✗ | required, per attribute |
 
 ## Translations
 
@@ -190,8 +193,9 @@ history is kept without the application recording it.
 1. **Rules saved in the database:** Datalog with recursion and stratified
    negation, versioned and rolled back with the data, and checked when
    defined.
-2. **History:** `as of` an id or an ISO 8601 time, for a whole statement or
-   one group of patterns, from an append-only log.
+2. **History:** `as of` and `since` an id or an ISO 8601 time, and every
+   link of a fact with `history`, for a whole statement or one group of
+   patterns, from an append-only log.
 3. **Statements about statements:** `<< s p o >>` in the data model, nesting
    freely, with each link's author and time recorded.
 4. **Standing queries** in the engine, kept up to date from the commits.

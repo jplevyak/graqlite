@@ -1,6 +1,6 @@
 # `since` and `history`: the other two views of the past
 
-**Status:** open · **Size:** medium · **Related:** [004](closed/004-history-and-link-variables.md) (`as of`, link variables), [018](closed/018-snapshot-readers.md) (readers as of a commit)
+**Status:** closed · **Size:** medium · **Related:** [004](004-history-and-link-variables.md) (`as of`, link variables), [018](018-snapshot-readers.md) (readers as of a commit)
 
 ## Motivation
 
@@ -19,7 +19,7 @@ go through. Today each needs a pair of `as of` queries and a `not`, or
 
 ## Design
 
-Two additions to [`Pattern`](../src/query/mod.rs) and the grammar, both
+Two additions to [`Pattern`](../../src/query/mod.rs) and the grammar, both
 orthogonal to `as of`:
 
 - **`since ID|TIME`**, on a statement or a group as `as of` is: a pattern
@@ -51,15 +51,15 @@ can be one query, and `\dr` could show when each rule was defined.
 
 ## Tasks
 
-- [ ] `Pattern::since` and `Query::since`, in the executor's candidate
+- [x] `Pattern::since` and `Query::since`, in the executor's candidate
       ranges and the reduction's
-- [ ] `Pattern::history` and `Query::history`; skip liveness; refuse in
+- [x] `Pattern::history` and `Query::history`; skip liveness; refuse in
       reductions and standing queries with a clear error
-- [ ] Grammar: `since ID|TIME` and `history` wherever `as of` goes;
+- [x] Grammar: `since ID|TIME` and `history` wherever `as of` goes;
       `Display` prints them; `state(?l)`
-- [ ] Example 07 gains a `since` window and a `history` listing; the
+- [x] Example 07 gains a `since` window and a `history` listing; the
       comparison (010/022) gains the Datomic column
-- [ ] Tests: the random query tests check `history` against the links
+- [x] Tests: the random query tests check `history` against the links
       enumerated from the log, and `since` against `as of` pairs
 
 ## Open questions
@@ -72,3 +72,44 @@ can be one query, and `\dr` could show when each rule was defined.
   has a time (`times.rs`) but no id of its own; a `commit(?l)` function
   giving the first id of the commit that wrote `?l` would be enough for
   "everything in the same commit as this".
+
+## Outcome
+
+`since ID|TIME` and `history` work on a `select` and on any `( group )`,
+with `as of` and in any order, and `Pattern::since`, `Pattern::history`,
+`Query::since` and `Query::history` are the library's. `state(?l)` says
+`live` or `dead`. Example 07 has a window and a listing, and the comparison
+has a Datomic column. A random test checks every plan shape against links
+enumerated from the log, and `since` against the links live at its ends.
+
+`since` is a lower bound on the same range as `as of`, so a large entry
+streamed newest first stops at it. A fact's latest link is the newest in the
+range, if it has one there, so nothing older is read. `history` takes the
+links of the range with no liveness pass, oldest first, so it reads a large
+entry whole rather than streaming it.
+
+### How it differs from the plan
+
+- **Neither word is a keyword.** Example 07 uses `since` as a predicate, so
+  they are recognized only after a group's `)` and before a select's
+  `where`, where no node can be.
+- **`verify` and `lookup` take them on a group,** as `verify ( p ) since 5`.
+  Their `as of` is a prefix, and there `since 5 /x` is already a triple.
+- **A statement's `since` and `history` print on a group.** The parser wraps
+  the pattern, so `select ?w since 2 where p` prints as `select ?w where
+  ( p ) since 2`, which means the same.
+- **`history` skips reduction rather than failing.** Reduction is the
+  planner's choice, so a query reads every link without it, even given a
+  budget. A standing query does refuse, for `since` as well: its deltas
+  compute what changed between commits and have no lower bound.
+- **More is refused than the issue names,** each with its own error: paths
+  (they follow live links), rule calls and `nearest` in a `since` or `history`
+  group or query, aggregates' links, overlays (result graphs and assumptions,
+  whose links have no place in the log), and `history` when recording links,
+  as `lookup` does, since what it returns is live.
+- **Compaction limits `history`, not `since`.** Compaction keeps what `since`
+  matches but drops superseded and dead links, so a `history` pattern needing
+  links at or before the horizon fails with `Error::Compacted`, reporting `as
+  of 0` if it has no `since`.
+
+`\show` and `\dr` are unchanged. The open questions above remain open.

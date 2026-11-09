@@ -240,6 +240,12 @@ pub struct Pattern {
     /// The id as of which this pattern sees the graph, overriding the
     /// query's.
     pub as_of: Option<u64>,
+    /// Matches only links appended after this id, overriding the query's.  A
+    /// fact whose latest link is older is not matched, though it is live.
+    pub since: Option<u64>,
+    /// Matches every link of its facts, live or dead, latest or not, oldest
+    /// first, instead of each fact's latest live link.
+    pub history: bool,
     /// The subgraph the link must be in (see
     /// [Subgraphs](crate::graph#subgraphs)); a variable not bound binds each
     /// subgraph it is in.
@@ -673,6 +679,8 @@ impl Group {
             predicate: predicate.into(),
             object: object.into(),
             as_of: None,
+            since: None,
+            history: false,
             graph: self.graph,
             author: None,
         });
@@ -739,6 +747,23 @@ impl Group {
     pub fn at(&mut self, id: u64) -> &mut Self {
         if let Some(p) = self.patterns.last_mut() {
             p.as_of = Some(id);
+        }
+        self
+    }
+
+    /// Makes the last pattern added match only links appended after `id`.
+    pub fn since(&mut self, id: u64) -> &mut Self {
+        if let Some(p) = self.patterns.last_mut() {
+            p.since = Some(id);
+        }
+        self
+    }
+
+    /// Makes the last pattern added match every link of its facts, live or
+    /// dead, latest or not.
+    pub fn history(&mut self) -> &mut Self {
+        if let Some(p) = self.patterns.last_mut() {
+            p.history = true;
         }
         self
     }
@@ -879,6 +904,31 @@ impl Group {
         let paths = self.paths.iter().filter_map(|p| p.as_of);
         let inner = self.groups().filter_map(Group::earliest_as_of);
         own.chain(paths).chain(inner).min()
+    }
+
+    /// The lowest id below which a `history` pattern of the group, or one in
+    /// it, needs every link: `history` and `since` are the query's.
+    fn earliest_history(&self, history: bool, since: Option<u64>) -> Option<u64> {
+        let own = self
+            .patterns
+            .iter()
+            .filter(|p| p.history || history)
+            .map(|p| p.since.or(since).unwrap_or(0));
+        let inner = self
+            .groups()
+            .filter_map(|g| g.earliest_history(history, since));
+        own.chain(inner).min()
+    }
+
+    /// Whether a pattern of the group, or one in it, is `history`.
+    pub(crate) fn has_history(&self) -> bool {
+        self.patterns.iter().any(|p| p.history) || self.groups().any(Group::has_history)
+    }
+
+    /// Whether a pattern of the group, or one in it, is `since` or `history`.
+    pub(crate) fn has_window(&self) -> bool {
+        self.patterns.iter().any(|p| p.history || p.since.is_some())
+            || self.groups().any(Group::has_window)
     }
 
     /// Whether the group, or one in it, has an optional group.
@@ -1050,6 +1100,8 @@ pub struct Query {
     /// The rows to skip, after ordering.
     offset: usize,
     as_of: Option<u64>,
+    since: Option<u64>,
+    history: bool,
     reduction_budget: Option<u64>,
     /// The parameters, in the order their values are given: variables bound
     /// before the query starts (see [`param`](Self::param)).
@@ -1542,6 +1594,35 @@ impl Query {
         self
     }
 
+    /// Matches only links appended after `id`, except in patterns given
+    /// their own (see [`Pattern::since`]).
+    pub fn since(&mut self, id: u64) -> &mut Self {
+        self.since = Some(id);
+        self
+    }
+
+    /// Makes every pattern match all the links of its facts (see
+    /// [`Pattern::history`]).
+    pub fn history(&mut self) -> &mut Self {
+        self.history = true;
+        self
+    }
+
+    /// Whether any pattern, of the query or its rules, reads dead and
+    /// superseded links.
+    pub(crate) fn uses_history(&self) -> bool {
+        self.history || self.root.has_history() || self.rules.iter().any(|r| r.body.has_history())
+    }
+
+    /// Whether any pattern, of the query or its rules, is `since` or
+    /// `history`.
+    pub(crate) fn uses_window(&self) -> bool {
+        self.history
+            || self.since.is_some()
+            || self.root.has_window()
+            || self.rules.iter().any(|r| r.body.has_window())
+    }
+
     /// Limits the reduction of the top group to reading about `entries`
     /// index entries ([`DEFAULT_REDUCTION_BUDGET`] by default); 0 turns it
     /// off.  Giving a budget also makes the plan reduce whether or not it
@@ -1581,9 +1662,17 @@ impl Query {
         // A reader sees the graph as of its end, which a compaction since may
         // have passed.
         let reader = g.is_reader().then(|| g.next_id().saturating_sub(1));
-        let earliest = [self.as_of, self.root.earliest_as_of(), reader]
+        // Compaction leaves the same live links, but not every link: a
+        // `history` pattern needs them all, from its `since` on.
+        let history = self.root.earliest_history(self.history, self.since);
+        let earliest = [self.as_of, self.root.earliest_as_of(), reader, history]
             .into_iter()
-            .chain(self.rules.iter().map(|r| r.body.earliest_as_of()))
+            .chain(self.rules.iter().flat_map(|r| {
+                [
+                    r.body.earliest_as_of(),
+                    r.body.earliest_history(false, None),
+                ]
+            }))
             .flatten()
             .min();
         match earliest {
@@ -1725,6 +1814,18 @@ impl Query {
     /// Checks the query's groups, and that the variables selected and
     /// ordered by are bound.
     fn check(&self) -> Result<()> {
+        if (self.since.is_some() || self.history)
+            && (self.root.has_paths_or_calls() || self.root.has_nearest())
+        {
+            return Err(Error::InvalidArgument(
+                "a query with paths, rule calls or nearest searches can't be 'since' or 'history'",
+            ));
+        }
+        if self.record && self.uses_history() {
+            return Err(Error::InvalidArgument(
+                "a query recording its links can't be 'history': it returns live links",
+            ));
+        }
         let bound_first: Vec<Var> = self.params.iter().chain(&self.hidden).copied().collect();
         self.root.check(&self.relations, &bound_first)?;
         for rule in &self.rules {
@@ -1810,6 +1911,12 @@ impl Query {
         }
         if let Some(t) = p.author {
             spo = format!("{spo} by {}", self.term_name(t, name));
+        }
+        if let Some(id) = p.since {
+            spo = format!("{spo} since {id}");
+        }
+        if p.history {
+            spo = format!("{spo} history");
         }
         match p.as_of {
             Some(id) => format!("{spo} as of {id}"),

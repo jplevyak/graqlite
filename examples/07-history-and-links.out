@@ -50,3 +50,22 @@ links in (1):
  /ben
  /dan
 (2 rows)
+ who
+------
+ /dan
+(1 row)
+ who
+------
+ /cat
+(1 row)
+ l    | who  | state(?l)
+------+------+-----------
+ #58  | /ben | live
+ #90  | /cat | live
+ #223 | /cat | dead
+ #255 | /dan | live
+(4 rows)
+ who
+------
+ /cat
+(1 row)

@@ -49,3 +49,17 @@ select ?p, ?o where << /ann knows /ben >> ?p ?o
 select ?who as of "2000-01-01" where /ann knows ?who
 
 select ?who as of "2030-01-01T09:00:00+01:00" where /ann knows ?who
+
+-- `since` is the other end of `as of`: only links appended after an id or a
+-- time.  /ann's link to /ben is older, so though live it isn't matched.
+select ?who since 90 where /ann knows ?who
+
+-- Together they are a window: who /ann came to know after #58, up to #90.
+select ?who as of 90 since 58 where /ann knows ?who
+
+-- `history` matches every link of a fact, live or dead, oldest first:
+-- `state` says which a link is, as `when` and `author` say when and who.
+select ?l, ?who, state(?l) history where << :?l /ann knows ?who >>
+
+-- On a group, beside the present: who /ann ever knew and doesn't now.
+select distinct ?who where ( /ann knows ?who ) history and not ( /ann knows ?who )

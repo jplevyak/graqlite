@@ -10,7 +10,7 @@ use std::fmt;
 
 use super::{
     AsOf, Comparison, GraphExpr, KEYWORDS, Node, Path, Pattern, RuleDef, SelectItem, SetValue,
-    Statement, TestOperand,
+    Statement, TestOperand, Window,
 };
 use crate::query::Cmp;
 use crate::times::format_time;
@@ -171,9 +171,9 @@ impl Printer {
                     segments.extend(take_run(&mut run));
                     segments.push(format!("optional ( {} )", self.disjunction(inner)));
                 }
-                Pattern::AsOf(inner, id) => {
+                Pattern::Window(inner, window) => {
                     segments.extend(take_run(&mut run));
-                    segments.push(format!("( {} ) as of {id}", self.disjunction(inner)));
+                    segments.push(format!("( {} ) {window}", self.disjunction(inner)));
                 }
                 Pattern::InGraph(inner, g) => {
                     segments.extend(take_run(&mut run));
@@ -280,7 +280,7 @@ impl Printer {
             Pattern::And(_)
             | Pattern::Or(_)
             | Pattern::Not(_)
-            | Pattern::AsOf(..)
+            | Pattern::Window(..)
             | Pattern::Optional(_) => {
                 unreachable!("flattened by conjunction")
             }
@@ -401,7 +401,7 @@ pub(super) fn each_node_mut(p: &mut Pattern, f: &mut impl FnMut(&mut Node)) {
         Pattern::And(ps) | Pattern::Or(ps) | Pattern::Assert(ps, _) => {
             ps.iter_mut().for_each(|p| each_node_mut(p, f))
         }
-        Pattern::Not(p) | Pattern::AsOf(p, _) | Pattern::Optional(p) => each_node_mut(p, f),
+        Pattern::Not(p) | Pattern::Window(p, _) | Pattern::Optional(p) => each_node_mut(p, f),
     }
 }
 
@@ -451,7 +451,7 @@ pub(super) fn each_node(p: &Pattern, f: &mut impl FnMut(&Node)) {
         Pattern::And(ps) | Pattern::Or(ps) | Pattern::Assert(ps, _) => {
             ps.iter().for_each(|p| each_node(p, f))
         }
-        Pattern::Not(p) | Pattern::AsOf(p, _) | Pattern::Optional(p) => each_node(p, f),
+        Pattern::Not(p) | Pattern::Window(p, _) | Pattern::Optional(p) => each_node(p, f),
     }
 }
 
@@ -521,6 +521,22 @@ impl Path {
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.show(0))
+    }
+}
+
+impl fmt::Display for Window {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut parts = Vec::new();
+        if let Some(t) = self.as_of {
+            parts.push(format!("as of {t}"));
+        }
+        if let Some(t) = self.since {
+            parts.push(format!("since {t}"));
+        }
+        if self.history {
+            parts.push("history".to_string());
+        }
+        f.write_str(&parts.join(" "))
     }
 }
 

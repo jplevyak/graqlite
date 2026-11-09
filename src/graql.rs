@@ -692,9 +692,8 @@ pub enum Pattern {
     /// A triple whose link is bound to its first node, a variable or blank
     /// node: written `<< :?l s p o >>`, which as a node stands for `?l`.
     Link(Node, Node, Node, Node),
-    /// A pattern seeing the graph as it was at an id or a time:
-    /// `( p ) as of 120`.
-    AsOf(Box<Pattern>, AsOf),
+    /// A pattern seeing part of the history: `( p ) as of 120 since 80`.
+    Window(Box<Pattern>, Window),
     /// A call to a rule: `name(args)`.
     Call(String, Vec<Node>),
     /// A comparison of nodes or expressions: `?a < 30`, `?p * ?q > 100`.
@@ -815,6 +814,30 @@ impl AsOf {
             AsOf::Id(id) => id,
             AsOf::Time(t) => g.id_at_time(t),
         }
+    }
+}
+
+/// Which of the past a group sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Window {
+    /// `as of`: the graph as it was then.
+    pub as_of: Option<AsOf>,
+    /// `since`: only links appended after then.
+    pub since: Option<AsOf>,
+    /// `history`: every link of each fact, live or dead, not its latest.
+    pub history: bool,
+}
+
+impl Window {
+    fn is_empty(&self) -> bool {
+        *self == Window::default()
+    }
+
+    /// Whether it depends on what was committed when, not only on ids.
+    fn is_timed(&self) -> bool {
+        [self.as_of, self.since]
+            .iter()
+            .any(|t| matches!(t, Some(AsOf::Time(_))))
     }
 }
 
@@ -1735,7 +1758,11 @@ impl Parser {
         let mut by = self.order_keys()?;
         // `limit` and `offset`, in either order.
         let (mut limit, mut offset) = self.limits()?;
-        let as_of = self.as_of()?;
+        let Window {
+            as_of,
+            since,
+            history,
+        } = self.window()?;
         let mut source = None;
         let graph = if self.keyword("from") {
             if self.keyword("graph") {
@@ -1784,6 +1811,15 @@ impl Parser {
         }
         if let Some(g) = graph {
             pattern = Pattern::InGraph(Box::new(pattern), g);
+        }
+        // The statement's `since` and `history` are the whole pattern's.
+        if since.is_some() || history {
+            let window = Window {
+                as_of: None,
+                since,
+                history,
+            };
+            pattern = Pattern::Window(Box::new(pattern), window);
         }
         let select = Statement::Select {
             distinct,
@@ -2039,6 +2075,45 @@ impl Parser {
         }
         self.next();
         self.next();
+        self.point_in_time("as of").map(Some)
+    }
+
+    /// Whether the word `w` comes next.  `since` and `history` are not
+    /// keywords, as they are ordinary names for predicates: they are
+    /// recognized only where no node can be.
+    fn word_follows(&self, w: &str) -> bool {
+        matches!(self.peek(), Token::Ident(x) if x.eq_ignore_ascii_case(w))
+    }
+
+    /// `as of`, `since` and `history`, in any order, each at most once.
+    fn window(&mut self) -> Result<Window> {
+        let mut w = Window::default();
+        loop {
+            if self.as_of_follows() {
+                if w.as_of.is_some() {
+                    return self.syntax("'as of' is given twice".to_string());
+                }
+                w.as_of = self.as_of()?;
+            } else if self.word_follows("since") {
+                if w.since.is_some() {
+                    return self.syntax("'since' is given twice".to_string());
+                }
+                self.next();
+                w.since = Some(self.point_in_time("since")?);
+            } else if self.word_follows("history") {
+                if w.history {
+                    return self.syntax("'history' is given twice".to_string());
+                }
+                self.next();
+                w.history = true;
+            } else {
+                return Ok(w);
+            }
+        }
+    }
+
+    /// An id or a time, after the words `after`.
+    fn point_in_time(&mut self, after: &str) -> Result<AsOf> {
         let (line, column) = self.here();
         let error = |message: String| {
             Err(Error::Syntax {
@@ -2049,16 +2124,18 @@ impl Parser {
         };
         match self.next() {
             Token::Number(n) => match n.parse() {
-                Ok(id) => Ok(Some(AsOf::Id(id))),
+                Ok(id) => Ok(AsOf::Id(id)),
                 Err(_) => error(format!("expected an id, found {n}")),
             },
             Token::Text(t) => match parse_time(&t) {
-                Some(time) => Ok(Some(AsOf::Time(time))),
+                Some(time) => Ok(AsOf::Time(time)),
                 None => error(format!(
                     "{t:?} is not an ISO 8601 time, such as \"2026-10-31T12:30Z\""
                 )),
             },
-            t => error(format!("expected an id or a time after 'as of', found {t}")),
+            t => error(format!(
+                "expected an id or a time after '{after}', found {t}"
+            )),
         }
     }
 
@@ -2126,9 +2203,11 @@ impl Parser {
         if self.punct("(") {
             let p = self.pattern()?;
             self.expect(&Token::Punct(")"))?;
-            let p = match self.as_of()? {
-                Some(id) => Pattern::AsOf(Box::new(p), id),
-                None => p,
+            let window = self.window()?;
+            let p = if window.is_empty() {
+                p
+            } else {
+                Pattern::Window(Box::new(p), window)
             };
             // `( p ) in g`: the same whether this group's or the statement's.
             return Ok(if self.keyword("in") {
@@ -3145,6 +3224,10 @@ struct Lowering<'g> {
     /// The id as of which the patterns being lowered see the graph, from an
     /// `as of` group.
     as_of: Option<u64>,
+    /// The `since` and `history` of the groups around the patterns being
+    /// lowered.
+    since: Option<u64>,
+    history: bool,
     /// The expressions of the `let`s of the pattern being lowered.
     lets: HashMap<String, Expr>,
     /// The parameters, by name: `$name`s, given values when the query runs.
@@ -3369,9 +3452,7 @@ impl Lowering<'_> {
                 group.pattern(s, p, o);
             }
         }
-        if let Some(id) = self.as_of {
-            group.at(id);
-        }
+        self.see_window(group);
         if let Some(g) = self.graph {
             group.in_subgraph(g);
         }
@@ -3518,6 +3599,25 @@ impl Lowering<'_> {
 
     /// Joins the patterns of a path of steps and inverses from `s` to `o`,
     /// through new variables.
+    /// Whether the patterns being lowered are in a `since` or `history`
+    /// group.
+    fn in_window(&self) -> bool {
+        self.since.is_some() || self.history
+    }
+
+    /// Gives the pattern just added the window of the groups around it.
+    fn see_window(&self, group: &mut Group) {
+        if let Some(id) = self.as_of {
+            group.at(id);
+        }
+        if let Some(id) = self.since {
+            group.since(id);
+        }
+        if self.history {
+            group.history();
+        }
+    }
+
     fn chain(&mut self, group: &mut Group, s: Term, path: &Path, o: Term) {
         match path {
             Path::Pred(p) => {
@@ -3560,7 +3660,7 @@ impl Lowering<'_> {
             Pattern::Or(_)
                 | Pattern::Not(_)
                 | Pattern::Optional(_)
-                | Pattern::AsOf(..)
+                | Pattern::Window(..)
                 | Pattern::InGraph(..)
         );
         if nested {
@@ -3644,12 +3744,15 @@ impl Lowering<'_> {
 
                 let (s, pr, o) = (self.term(s), self.term(pr), self.term(o));
                 group.link_pattern(link, s, pr, o);
-                if let Some(id) = self.as_of {
-                    group.at(id);
-                }
+                self.see_window(group);
                 if let Some(g) = self.graph {
                     group.in_subgraph(g);
                 }
+            }
+            Pattern::Path(..) | Pattern::PathExpr(..) if self.in_window() && !is_chain(p) => {
+                return Err(Error::Invalid(
+                    "a path follows live links: it can't be 'since' or 'history'".into(),
+                ));
             }
             Pattern::Path(..) | Pattern::PathExpr(..) if self.graph.is_some() && !is_chain(p) => {
                 return Err(Error::Unsupported {
@@ -3678,11 +3781,19 @@ impl Lowering<'_> {
                     self.mark_path(group);
                 }
             }
-            Pattern::AsOf(p, as_of) => {
-                let outer = self.as_of.replace(as_of.id(self.g));
+            Pattern::Window(p, window) => {
+                let outer = (self.as_of, self.since, self.history);
+                self.as_of = window.as_of.map_or(self.as_of, |t| Some(t.id(self.g)));
+                self.since = window.since.map_or(self.since, |t| Some(t.id(self.g)));
+                self.history |= window.history;
                 let result = self.add(group, p);
-                self.as_of = outer;
+                (self.as_of, self.since, self.history) = outer;
                 result?;
+            }
+            Pattern::Call(..) if self.in_window() => {
+                return Err(Error::Invalid(
+                    "a rule or search can't be called in a 'since' or 'history' group".into(),
+                ));
             }
             // The built-in search, unless a rule has its name.
             Pattern::Call(name, args)
@@ -3844,6 +3955,8 @@ fn lower_full(
         vars: HashMap::new(),
         relations: HashMap::new(),
         as_of: None,
+        since: None,
+        history: false,
         lets: HashMap::new(),
         params: HashMap::new(),
         recording: None,
@@ -3970,7 +4083,7 @@ fn lets(p: &Pattern) -> Result<HashMap<String, Expr>> {
                     collect(p, out)?;
                 }
             }
-            Pattern::Not(p) | Pattern::AsOf(p, _) | Pattern::Optional(p) => collect(p, out)?,
+            Pattern::Not(p) | Pattern::Window(p, _) | Pattern::Optional(p) => collect(p, out)?,
             _ => {}
         }
         Ok(())
@@ -3997,7 +4110,7 @@ fn lets(p: &Pattern) -> Result<HashMap<String, Expr>> {
                 .try_for_each(check),
             Pattern::And(ps) | Pattern::Or(ps) => ps.iter().try_for_each(|p| matched(p, lets)),
             Pattern::Not(p)
-            | Pattern::AsOf(p, _)
+            | Pattern::Window(p, _)
             | Pattern::Optional(p)
             | Pattern::InGraph(p, _) => matched(p, lets),
             Pattern::Compare(..)
@@ -4034,7 +4147,7 @@ fn calls(p: &Pattern, out: &mut Vec<String>) {
     match p {
         Pattern::Call(name, _) => out.push(name.clone()),
         Pattern::And(ps) | Pattern::Or(ps) => ps.iter().for_each(|p| calls(p, out)),
-        Pattern::Not(p) | Pattern::AsOf(p, _) | Pattern::Optional(p) => calls(p, out),
+        Pattern::Not(p) | Pattern::Window(p, _) | Pattern::Optional(p) => calls(p, out),
         Pattern::InGraph(p, _) => calls(p, out),
         Pattern::Triple(..)
         | Pattern::Tagged(..)
@@ -4105,7 +4218,7 @@ fn names_bound(p: &Pattern, blanks: bool, nodes: bool) -> Vec<String> {
                     }
                 }
             }
-            Pattern::AsOf(p, _) | Pattern::Optional(p) => collect(p, out),
+            Pattern::Window(p, _) | Pattern::Optional(p) => collect(p, out),
             Pattern::PathExpr(s, _, o) => {
                 for n in [s, o] {
                     match n {
@@ -4147,7 +4260,7 @@ fn triples(p: &Pattern, out: &mut Vec<(Node, Node, Node)>) {
             out.push((s.clone(), pr.clone(), o.clone()))
         }
         Pattern::And(ps) | Pattern::Or(ps) => ps.iter().for_each(|p| triples(p, out)),
-        Pattern::AsOf(p, _) | Pattern::Optional(p) | Pattern::InGraph(p, _) => triples(p, out),
+        Pattern::Window(p, _) | Pattern::Optional(p) | Pattern::InGraph(p, _) => triples(p, out),
         Pattern::Compare(..)
         | Pattern::Node(_)
         | Pattern::Test(_)
@@ -5860,7 +5973,7 @@ fn each_statement_expr(statement: &mut Statement, f: &mut impl FnMut(&mut Expr))
                 ps.iter_mut().for_each(|p| pattern(p, f))
             }
             Pattern::Not(p)
-            | Pattern::AsOf(p, _)
+            | Pattern::Window(p, _)
             | Pattern::Optional(p)
             | Pattern::InGraph(p, _) => pattern(p, f),
             _ => {}
@@ -6004,7 +6117,7 @@ fn each_statement_key(statement: &mut Statement, f: &mut impl FnMut(&mut String)
             Pattern::PathExpr(_, path, _) => steps(path, f),
             Pattern::And(ps) | Pattern::Or(ps) => ps.iter_mut().for_each(|p| paths(p, f)),
             Pattern::Not(p)
-            | Pattern::AsOf(p, _)
+            | Pattern::Window(p, _)
             | Pattern::Optional(p)
             | Pattern::InGraph(p, _) => paths(p, f),
             _ => {}

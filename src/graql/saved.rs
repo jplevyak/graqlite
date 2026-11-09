@@ -306,7 +306,7 @@ fn path_steps(
         Pattern::And(ps) | Pattern::Or(ps) => {
             ps.iter().for_each(|p| path_steps(p, values, keys, ids))
         }
-        Pattern::Not(p) | Pattern::AsOf(p, _) | Pattern::Optional(p) => {
+        Pattern::Not(p) | Pattern::Window(p, _) | Pattern::Optional(p) => {
             path_steps(p, values, keys, ids)
         }
         _ => {}

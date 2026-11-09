@@ -423,9 +423,9 @@ impl Group {
                     "an aggregate's link has no id, subgraph or author to match",
                 ));
             }
-            if p.as_of.is_some() {
+            if p.as_of.is_some() || p.since.is_some() || p.history {
                 return Err(Error::InvalidArgument(
-                    "an aggregate's link can't be matched 'as of'",
+                    "an aggregate's link can't be matched 'as of', 'since' or 'history'",
                 ));
             }
             self.calls.push(Call {

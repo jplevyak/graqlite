@@ -457,6 +457,8 @@ pub enum Func {
     /// A link's creation time (milliseconds since 1970) and author.
     When,
     Author,
+    /// Whether a link says its fact is `live` or `dead`.
+    State,
     /// The milliseconds since 1970 of an ISO 8601 time, and the time of a
     /// number of milliseconds.
     Time,
@@ -488,6 +490,7 @@ const FUNCS: &[(Func, &str, usize, usize)] = &[
     (Func::Id, "id", 1, 1),
     (Func::When, "when", 1, 1),
     (Func::Author, "author", 1, 1),
+    (Func::State, "state", 1, 1),
     (Func::Time, "time", 1, 1),
     (Func::Iso, "iso", 1, 1),
     (Func::Vector, "vector", 1, 1),
@@ -632,6 +635,16 @@ fn call(g: &Graph, f: Func, args: &[Cell]) -> Cell {
             match f {
                 Func::When => Cell::Int(link.0 as i64),
                 _ => Cell::of_id(link.1),
+            }
+        }
+        Func::State => {
+            let Some(Cell::Id(id)) = args.first() else {
+                return Cell::Unbound;
+            };
+            match g.get(*id).ok().and_then(|r| r.as_link().map(|l| l.dead())) {
+                Some(true) => Cell::Text("dead".into()),
+                Some(false) => Cell::Text("live".into()),
+                None => Cell::Unbound,
             }
         }
         Func::Time => text(0)

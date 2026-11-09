@@ -93,6 +93,11 @@ impl StandingQuery {
                 "a standing query can not have a limit, offset, order or as_of",
             ));
         }
+        if query.uses_window() {
+            return Err(Error::InvalidArgument(
+                "a standing query can not be 'since' or 'history'",
+            ));
+        }
         if query.restricts_links() {
             return Err(Error::InvalidArgument(
                 "a standing query can not restrict its links' subgraphs or authors",

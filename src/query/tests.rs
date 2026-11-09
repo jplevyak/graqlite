@@ -85,6 +85,30 @@ struct BruteForce<'a> {
 type Partial = Vec<Option<u64>>;
 
 impl BruteForce<'_> {
+    /// The links pattern `p` matches, given its window: enumerated from the
+    /// log for `history`, and filtered by id for `since`.
+    fn window_links(&mut self, p: &Pattern) -> Vec<(u64, [u64; 3])> {
+        let as_of = p.as_of.or(self.q.as_of);
+        let since = p.since.or(self.q.since).unwrap_or(0);
+        if p.history || self.q.history {
+            let g = self.g;
+            return g
+                .local()
+                .log()
+                .records(g.start_id())
+                .filter_map(|r| {
+                    let r = r.unwrap();
+                    let link = r.as_link()?;
+                    let spo = [link.subject(), link.predicate(), link.object()];
+                    (r.id() > since && r.id() <= as_of.unwrap_or(u64::MAX)).then_some((r.id(), spo))
+                })
+                .collect();
+        }
+        let mut links = self.links(as_of);
+        links.retain(|l| l.0 > since);
+        links
+    }
+
     fn links(&mut self, as_of: Option<u64>) -> Vec<(u64, [u64; 3])> {
         let (g, overlay) = (self.g, self.overlay);
         self.links
@@ -100,7 +124,7 @@ impl BruteForce<'_> {
     fn group(&mut self, group: &Group, row: &Partial) -> Vec<Partial> {
         let mut rows = vec![row.clone()];
         for p in &group.patterns {
-            let links = self.links(p.as_of.or(self.q.as_of));
+            let links = self.window_links(p);
             let mut next = Vec::new();
             for row in &rows {
                 for &(id, spo) in &links {
@@ -4294,4 +4318,229 @@ fn nearest_uses_the_vector_index_as_the_scan_would() {
     g.drop_vector_index(p).unwrap();
     g.commit().unwrap();
     assert!(g.vector_search(p).is_none());
+}
+
+/// Gives a generated query a random `since` or `history`, on the whole or on
+/// patterns of its top group.
+fn add_window(q: &mut Query, rng: &mut Rng, (start, end): (u64, u64)) {
+    let id = start + rng.next() % (end - start);
+    match rng.below(5) {
+        0 => {
+            q.since(id);
+        }
+        1 => {
+            q.history();
+        }
+        2 => {
+            q.since(id).history();
+        }
+        3 => q.root.patterns.iter_mut().for_each(|p| {
+            if rng.chance(60) {
+                p.since = Some(id);
+            }
+        }),
+        _ => q.root.patterns.iter_mut().for_each(|p| {
+            if rng.chance(60) {
+                p.history = true;
+                p.since = rng.chance(40).then_some(id);
+            }
+        }),
+    }
+}
+
+/// `history` against the links enumerated from the log, and `since` against
+/// the links live as of each end of its window, on small and large entries.
+#[test]
+fn random_queries_since_and_history() {
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let (mut rows, mut checked) = (0, 0);
+    // On the large graph, single patterns: every link joined with every
+    // other is too much for the brute force.
+    for size in [0, 0, 0, 0, 1500] {
+        let (g, nodes, predicates) = if size == 0 {
+            random_graph(&mut rng)
+        } else {
+            random_graph_of(&mut rng, size)
+        };
+        let ids = (g.start_id(), g.next_id());
+        for _ in 0..120 {
+            let mut q = Generator {
+                rng: &mut rng,
+                nodes: &nodes,
+                predicates: &predicates,
+                ids,
+            }
+            .query();
+            add_window(&mut q, &mut rng, ids);
+            let simple = q.root.patterns.len() == 1 && q.root.groups().next().is_none();
+            if q.validate().is_err() || (size > 0 && !simple) {
+                continue;
+            }
+            check(&q, &g);
+            checked += 1;
+            rows += usize::from(!BruteForce::rows(&q, &g).is_empty());
+        }
+    }
+    assert!(checked > 200, "{checked}");
+    assert!(rows > 80, "{rows}");
+}
+
+/// Ann knows Ben (kept), and Cat (deleted, then added again after `middle`).
+fn acquaintances() -> (Graph, [u64; 5], u64, [u64; 4]) {
+    let mut g = Graph::open(None, Options::default()).unwrap();
+    let (ann, knows) = (g.node_by_key(b"/ann").unwrap(), g.value(b"knows").unwrap());
+    let (ben, cat) = (
+        g.node_by_key(b"/ben").unwrap(),
+        g.node_by_key(b"/cat").unwrap(),
+    );
+    let dan = g.node_by_key(b"/dan").unwrap();
+    let first_ben = g.link(ann, knows, ben).unwrap();
+    let first_cat = g.link(ann, knows, cat).unwrap();
+    let middle = g.next_id() - 1;
+    let dead_cat = g.delete_link(ann, knows, cat).unwrap().unwrap();
+    let again_cat = g.link(ann, knows, cat).unwrap();
+    g.commit().unwrap();
+    (
+        g,
+        [ann, knows, ben, cat, dan],
+        middle,
+        [first_ben, first_cat, dead_cat, again_cat],
+    )
+}
+
+fn who(g: &Graph, build: impl FnOnce(&mut Query, Var)) -> Vec<u64> {
+    let mut q = Query::new();
+    let o = q.var("o");
+    q.select([o]);
+    build(&mut q, o);
+    let mut rows: Vec<u64> = q.run(g).unwrap().into_iter().map(|r| r[0]).collect();
+    rows.sort_unstable();
+    rows
+}
+
+#[test]
+fn since_sees_only_later_links() {
+    let (g, [ann, knows, _ben, cat, _dan], middle, _) = acquaintances();
+    // Ben was live before and is still: not matched.  Cat was added again.
+    assert_eq!(
+        who(&g, |q, o| {
+            q.pattern(ann, knows, o);
+            q.since(middle);
+        }),
+        [cat]
+    );
+    // As a window: Cat's only link in it is dead, so nothing is live.
+    let dead = g.find_link(ann, knows, cat).unwrap() - 1;
+    assert!(
+        who(&g, |q, o| {
+            q.pattern(ann, knows, o);
+            q.as_of(dead).since(middle);
+        })
+        .is_empty()
+    );
+    // An empty window, and one past the end, match nothing.
+    assert!(
+        who(&g, |q, o| {
+            q.pattern(ann, knows, o);
+            q.as_of(1).since(u64::MAX);
+        })
+        .is_empty()
+    );
+}
+
+#[test]
+fn history_matches_every_link_in_id_order() {
+    let (g, [ann, knows, ..], middle, links) = acquaintances();
+    let mut q = Query::new();
+    let (l, o) = (q.var("l"), q.var("o"));
+    q.link_pattern(l, ann, knows, o);
+    q.select([l]);
+    q.history();
+    let rows: Vec<u64> = q.run(&g).unwrap().into_iter().map(|r| r[0]).collect();
+    assert_eq!(rows, links);
+    // Bounded by `since`, and on a pattern alone.
+    let mut q = Query::new();
+    let (l, o) = (q.var("l"), q.var("o"));
+    q.root
+        .link_pattern(l, ann, knows, o)
+        .since(middle)
+        .history();
+    q.select([l]);
+    let rows: Vec<u64> = q.run(&g).unwrap().into_iter().map(|r| r[0]).collect();
+    assert_eq!(rows, links[2..]);
+    // The plan says so, and forcing a reduction doesn't lose the dead links.
+    let mut q = Query::new();
+    let (l, o) = (q.var("l"), q.var("o"));
+    q.link_pattern(l, ann, knows, o);
+    q.select([l]);
+    q.history().reduction_budget(1000);
+    assert!(q.plan(&g).unwrap().explain().contains("history"));
+    assert_eq!(q.run(&g).unwrap().len(), links.len());
+}
+
+#[test]
+fn since_stops_at_its_bound_in_large_entries() {
+    let mut g = Graph::open(None, Options::default()).unwrap();
+    let (a, p) = (g.node_by_key(b"/a").unwrap(), g.value(b"p").unwrap());
+    let objects: Vec<u64> = (0..500)
+        .map(|i| {
+            let o = g.value(format!("o{i}").as_bytes()).unwrap();
+            g.link(a, p, o).unwrap();
+            o
+        })
+        .collect();
+    g.commit().unwrap();
+    let since = g.find_link(a, p, objects[399]).unwrap();
+    let found = who(&g, |q, o| {
+        q.pattern(a, p, o);
+        q.since(since);
+    });
+    let mut expected = objects[400..].to_vec();
+    expected.sort_unstable();
+    assert_eq!(found, expected);
+}
+
+#[test]
+fn what_since_and_history_refuse() {
+    let (mut g, [ann, knows, ..], middle, _) = acquaintances();
+    let query = |window: fn(&mut Query, u64), middle| {
+        let mut q = Query::new();
+        let o = q.var("o");
+        q.pattern(ann, knows, o);
+        q.select([o]);
+        window(&mut q, middle);
+        q
+    };
+    let since = query(
+        |q, id| {
+            q.since(id);
+        },
+        middle,
+    );
+    let history = query(
+        |q, _| {
+            q.history();
+        },
+        middle,
+    );
+    for q in [&since, &history] {
+        assert!(StandingQuery::new(q, &g).is_err());
+        // An overlay's links have no place in the log.
+        assert!(q.run_over(&g, &Arc::new(Overlay::new())).is_err());
+    }
+    // Compaction keeps the live links, but not every link.
+    let horizon = g.next_id() - 1;
+    g.link(ann, knows, ann).unwrap();
+    g.commit().unwrap();
+    g.compact(horizon).unwrap();
+    assert!(matches!(history.run(&g), Err(Error::Compacted { .. })));
+    assert!(since.run(&g).is_ok());
+    let mut later = query(
+        |q, _| {
+            q.history();
+        },
+        middle,
+    );
+    later.since(horizon);
+    assert!(later.run(&g).is_ok());
 }
