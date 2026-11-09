@@ -3,9 +3,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::aggregate::Cell;
 use super::exec::Rows;
+use super::profile::{Counts, Profile, Profiler, ReductionProfile, StepProfile, step_key};
 use super::reduce::{self, Link, Reduced, Reduction};
 use super::result::ResultGraph;
 use super::rules::{self, Relations, Tuples};
@@ -129,6 +131,8 @@ pub(crate) enum Step {
         access: Access,
         keys: Vec<Var>,
         rows: f64,
+        /// The index entries' ids expected to be read, over every row.
+        entries: f64,
         reduced: Option<Arc<Vec<Link>>>,
         /// Whether `reduced` must be used: the links are given, not found.
         required: bool,
@@ -228,7 +232,8 @@ pub(crate) struct NotChange {
 /// The plan of a group.
 #[derive(Debug, Clone)]
 pub(crate) struct GroupPlan {
-    pub steps: Vec<Step>,
+    /// Shared by the plan's clones, which a profile knows them by.
+    pub steps: Arc<Vec<Step>>,
     /// The estimated cost and rows for each row given.
     pub cost: f64,
     pub rows: f64,
@@ -250,6 +255,10 @@ pub struct Plan {
     pub(crate) next_id: u64,
     /// Whether each slot of a row is a parameter's.
     pub(crate) params: Arc<[bool]>,
+    /// What the planner expected the reduction to cost, if it estimated it.
+    pub(crate) reduction_cost: Option<f64>,
+    /// The counters of a profiled run; see [`Plan::profile`].
+    pub(crate) profiler: Option<Arc<Profiler>>,
 }
 
 impl Plan {
@@ -272,11 +281,77 @@ impl Plan {
     /// The same, naming each id of the query with `name`, such as by its
     /// key or data.
     pub fn explain_with(&self, name: &dyn Fn(u64) -> String) -> String {
+        self.explain_of(name, None)
+    }
+
+    /// The plan, as [`explain_with`](Self::explain_with) prints it, with
+    /// what `profile`, a [profile](Self::profile) of it, says each step did.
+    pub fn explain_profile(&self, profile: &Profile, name: &dyn Fn(u64) -> String) -> String {
+        self.explain_of(name, Some(profile))
+    }
+
+    /// `profile` of this plan, from its counters.
+    pub(crate) fn profile_of(
+        &self,
+        counts: HashMap<usize, Counts>,
+        rows: u64,
+        time: Duration,
+    ) -> Profile {
+        let mut sink = Sink {
+            counts: &counts,
+            steps: Vec::new(),
+        };
+        let name = |id: u64| id.to_string();
+        let mut text = String::new();
+        explain_group(
+            &self.query,
+            &self.root,
+            0,
+            true,
+            &name,
+            &mut text,
+            Some(&mut sink),
+        );
+        let steps = sink.steps;
+        Profile {
+            steps,
+            rows,
+            time,
+            strata: self.relations.strata.clone(),
+            reduction: self.reduction.as_ref().map(|r| ReductionProfile {
+                entries: r.entries,
+                estimated_cost: self.reduction_cost,
+                time: r.time,
+            }),
+            counts,
+        }
+    }
+
+    fn explain_of(&self, name: &dyn Fn(u64) -> String, profile: Option<&Profile>) -> String {
         let q = &self.query;
         let mut out = String::new();
         for (i, tuples) in self.relations.tuples.iter().enumerate() {
             if let Some(t) = tuples {
                 let _ = writeln!(out, "relation {}: {} tuples", q.relations[i].0, t.len());
+            }
+        }
+        for s in profile.iter().flat_map(|p| &p.strata) {
+            let time: Duration = s.rounds.iter().map(|r| r.time).sum();
+            let _ = writeln!(
+                out,
+                "stratum {}: {} rounds, {}",
+                s.relations.join(", "),
+                s.rounds.len(),
+                millis(time)
+            );
+            for (i, r) in s.rounds.iter().enumerate() {
+                let _ = writeln!(
+                    out,
+                    "  round {}: {} new tuples, {}",
+                    i + 1,
+                    r.new_tuples,
+                    millis(r.time)
+                );
             }
         }
         if let Some(r) = &self.reduction {
@@ -291,9 +366,17 @@ impl Plan {
             } else {
                 format!("{} candidates, ", vars.join(", "))
             };
+            let measured = profile
+                .and_then(|p| p.reduction)
+                .map_or(String::new(), |r| {
+                    let estimate = r
+                        .estimated_cost
+                        .map_or(String::new(), |c| format!(", estimated cost ~{c:.0}"));
+                    format!("{estimate}, {}", millis(r.time))
+                });
             let _ = writeln!(
                 out,
-                "reduce: {candidates}{} index entries read{}",
+                "reduce: {candidates}{} index entries read{}{measured}",
                 r.entries,
                 if r.complete {
                     ""
@@ -302,7 +385,11 @@ impl Plan {
                 }
             );
         }
-        explain_group(q, &self.root, 0, true, name, &mut out);
+        let mut sink = profile.map(|p| Sink {
+            counts: &p.counts,
+            steps: Vec::new(),
+        });
+        explain_group(q, &self.root, 0, true, name, &mut out, sink.as_mut());
         let var = |v: Var| q.var_name(v);
         // Nested limits, after matching: each within the values of those
         // before it.
@@ -383,6 +470,80 @@ fn join_name(q: &Query, first: bool, join: Join, keys: &[Var]) -> String {
 
 /// Describes `plan`, whose rows start as a single row binding nothing if
 /// `alone`.
+/// The time, as `\explain analyze` prints it.
+fn millis(d: Duration) -> String {
+    format!("{:.3} ms", d.as_secs_f64() * 1000.0)
+}
+
+/// What a walk of a plan's steps is told and collects, for a profile.
+struct Sink<'a> {
+    counts: &'a HashMap<usize, Counts>,
+    steps: Vec<StepProfile>,
+}
+
+impl Sink<'_> {
+    /// Records `step`, whose text starts at `start` of `out`, in `slot`, and
+    /// adds what it did to its first line.
+    fn annotate(&mut self, step: &Step, slot: usize, depth: usize, start: usize, out: &mut String) {
+        let actual = self
+            .counts
+            .get(&step_key(step))
+            .copied()
+            .unwrap_or_default();
+        let end = start + out[start..].find('\n').unwrap_or(out.len() - start);
+        let line = &out[start..end];
+        let (text, colon) = match line.strip_suffix(':') {
+            Some(text) => (text, ":"),
+            None => (line, ""),
+        };
+        let (estimated_rows, estimated_entries) = step.estimates();
+        let mut note = String::new();
+        if actual.runs == 0 {
+            note.push_str(" never run");
+        } else {
+            let _ = write!(note, " actual {}", actual.rows);
+            if actual.runs > 1 {
+                let _ = write!(note, " over {} runs", actual.runs);
+            }
+            if let Some(e) = estimated_entries {
+                let _ = write!(note, ", entries ~{e:.0} actual {}", actual.entries);
+            }
+            if actual.lookups > 0 {
+                let _ = write!(note, ", {} lookups", actual.lookups);
+            }
+            let _ = write!(note, ", {}", millis(actual.time));
+        }
+        self.steps[slot] = StepProfile {
+            depth,
+            step: text.trim_start().to_string(),
+            estimated_rows,
+            estimated_entries,
+            actual,
+        };
+        let at = start + text.len();
+        debug_assert_eq!(&out[at..end], colon);
+        out.insert_str(at, &note);
+    }
+}
+
+impl Step {
+    /// The rows and index entries the planner expected of the step, of
+    /// those it estimates.
+    fn estimates(&self) -> (Option<f64>, Option<f64>) {
+        match self {
+            Step::Pattern { rows, entries, .. } => (Some(*rows), Some(*entries)),
+            Step::Union { rows, .. }
+            | Step::Path { rows, .. }
+            | Step::Call { rows, .. }
+            | Step::Nearest { rows, .. }
+            | Step::Not { rows, .. }
+            | Step::Optional { rows, .. }
+            | Step::NotChange { rows, .. } => (Some(*rows), None),
+            Step::Filter(_) => (None, None),
+        }
+    }
+}
+
 fn explain_group(
     q: &Query,
     plan: &GroupPlan,
@@ -390,10 +551,16 @@ fn explain_group(
     alone: bool,
     name: Namer<'_>,
     out: &mut String,
+    mut sink: Option<&mut Sink<'_>>,
 ) {
     let pad = "  ".repeat(depth);
     let mut first = alone;
-    for step in &plan.steps {
+    for step in plan.steps.iter() {
+        let start = out.len();
+        let slot = sink.as_deref_mut().map(|s| {
+            s.steps.push(StepProfile::default());
+            s.steps.len() - 1
+        });
         match step {
             Step::Pattern {
                 pattern,
@@ -430,7 +597,15 @@ fn explain_group(
                 );
                 for b in branches {
                     let _ = writeln!(out, "{pad}  branch:");
-                    explain_group(q, b, depth + 2, *join == Join::Hash, name, out);
+                    explain_group(
+                        q,
+                        b,
+                        depth + 2,
+                        *join == Join::Hash,
+                        name,
+                        out,
+                        sink.as_deref_mut(),
+                    );
                 }
                 first = false;
             }
@@ -475,7 +650,7 @@ fn explain_group(
                         let _ = writeln!(out, "{pad}  searching, once:");
                     }
                 }
-                explain_group(q, scan, depth + 2, true, name, out);
+                explain_group(q, scan, depth + 2, true, name, out, sink.as_deref_mut());
                 first = false;
             }
             Step::Filter(filters) => {
@@ -499,7 +674,15 @@ fn explain_group(
                     "{pad}not ({how}, on {}), rows ~{rows:.0}:",
                     keys.join(", ")
                 );
-                explain_group(q, group, depth + 1, *join == Join::Hash, name, out);
+                explain_group(
+                    q,
+                    group,
+                    depth + 1,
+                    *join == Join::Hash,
+                    name,
+                    out,
+                    sink.as_deref_mut(),
+                );
             }
             Step::Optional {
                 group,
@@ -516,7 +699,15 @@ fn explain_group(
                     }
                 };
                 let _ = writeln!(out, "{pad}optional ({how}), rows ~{rows:.0}:");
-                explain_group(q, group, depth + 1, *join == Join::Hash, name, out);
+                explain_group(
+                    q,
+                    group,
+                    depth + 1,
+                    *join == Join::Hash,
+                    name,
+                    out,
+                    sink.as_deref_mut(),
+                );
                 first = false;
             }
             Step::NotChange {
@@ -533,10 +724,13 @@ fn explain_group(
                     "{pad}not changing to {to}, of {} keys, rows ~{rows:.0}; was:",
                     flips.len()
                 );
-                explain_group(q, old, depth + 1, false, name, out);
+                explain_group(q, old, depth + 1, false, name, out, sink.as_deref_mut());
                 let _ = writeln!(out, "{pad}is:");
-                explain_group(q, new, depth + 1, false, name, out);
+                explain_group(q, new, depth + 1, false, name, out, sink.as_deref_mut());
             }
+        }
+        if let (Some(s), Some(slot)) = (sink.as_deref_mut(), slot) {
+            s.annotate(step, slot, depth, start, out);
         }
     }
 }
@@ -768,7 +962,7 @@ fn reduction_may_pay(
     width: usize,
     cost: f64,
     rows: f64,
-) -> bool {
+) -> Option<f64> {
     let rows = rows.max(1.0);
     let patterns = &group.patterns;
     let unbound = vec![false; width];
@@ -803,7 +997,7 @@ fn reduction_may_pay(
         read[i] = true;
         reducing += c * REDUCTION_FACTOR;
         if reducing >= cost {
-            return false;
+            return None;
         }
         let links = links.clamp(1.0, rows);
         for v in patterns[i].vars() {
@@ -815,7 +1009,7 @@ fn reduction_may_pay(
     // per row for each other.
     let n = patterns.len() as f64;
     let joining = n * rows * REDUCED_ENTRY_COST + (n - 1.0) * rows * REDUCED_LOOKUP_COST;
-    reducing + joining < cost
+    (reducing + joining < cost).then_some(reducing)
 }
 
 fn ratio(a: u64, b: u64) -> f64 {
@@ -1001,7 +1195,7 @@ impl Planner<'_, '_> {
             return None;
         }
         Some(GroupPlan {
-            steps: best.steps,
+            steps: Arc::new(best.steps),
             cost: best.cost,
             rows: best.rows,
         })
@@ -1181,6 +1375,10 @@ impl Planner<'_, '_> {
                     access: Access::All,
                     keys: shared_vars(pattern, &partial.bound),
                     rows,
+                    entries: match join {
+                        Join::Bind => partial.rows * matches,
+                        Join::Hash => n,
+                    },
                     reduced: Some(r.links.clone()),
                     required,
                     candidates: candidates.clone(),
@@ -1215,6 +1413,7 @@ impl Planner<'_, '_> {
                         access: Access::of(link, positions(&partial.bound)),
                         keys: keys.clone(),
                         rows,
+                        entries: partial.rows * bind.entries,
                         reduced: None,
                         required: false,
                         candidates: candidates.clone(),
@@ -1239,6 +1438,10 @@ impl Planner<'_, '_> {
                         access,
                         keys: keys.clone(),
                         rows,
+                        entries: match join {
+                            Join::Bind => partial.rows * entries,
+                            Join::Hash => entries,
+                        },
                         reduced: None,
                         required: false,
                         candidates: candidates.clone(),
@@ -1262,6 +1465,7 @@ impl Planner<'_, '_> {
                             access: Access::of(false, positions(&unbound)),
                             keys,
                             rows,
+                            entries: scan.entries,
                             reduced: None,
                             required: false,
                             candidates: candidates.clone(),
@@ -1510,13 +1714,15 @@ pub(crate) fn plan_full(
     // them), plan without reducing first, and reduce only if that could
     // cost less.
     let mut planned = None;
+    let mut reduction_cost = None;
     if may_reduce && q.reduction_budget.is_none() && preset.is_empty() {
         let mut planner = new_planner(None);
         let plan = planner
             .plan_group(&q.root, &params)
             .ok_or_else(unplannable)?;
-        if !reduction_may_pay(&mut planner.est, &q.root, width, plan.cost, plan.rows) {
-            planned = Some(plan);
+        match reduction_may_pay(&mut planner.est, &q.root, width, plan.cost, plan.rows) {
+            Some(cost) => reduction_cost = Some(cost),
+            None => planned = Some(plan),
         }
     }
     let (root, reduction) = match planned {
@@ -1534,6 +1740,8 @@ pub(crate) fn plan_full(
         }
     };
     Ok(Plan {
+        reduction_cost,
+        profiler: None,
         query: q.clone(),
         root,
         reduction,

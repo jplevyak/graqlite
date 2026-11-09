@@ -343,6 +343,30 @@ fn synchronous() {
 }
 
 #[test]
+fn explain_analyze() {
+    let (out, status) = run(
+        &[
+            "-q",
+            "-c",
+            "insert /a p 1 , 2",
+            "-c",
+            "\\explain analyze select ?x where /a p ?x",
+        ],
+        "",
+    );
+    assert_eq!(status, 0, "{out}");
+    assert!(
+        out.contains("rows ~2 actual 2, entries ~2 actual 2, 1 lookups, "),
+        "{out}"
+    );
+    assert!(out.contains(" ms\ntotal: 2 rows in "), "{out}");
+    // It runs only what has a plan, as \\explain does.
+    let (out, status) = run(&["-q", "-c", "\\explain analyze insert /a p 3"], "");
+    assert!(out.contains("only select, verify and lookup"), "{out}");
+    assert_ne!(status, 0);
+}
+
+#[test]
 fn options() {
     let (out, status) = run(&["--help"], "");
     assert_eq!(status, 0);

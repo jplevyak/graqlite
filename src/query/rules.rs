@@ -12,8 +12,10 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::plan::{self, Overrides};
+use super::profile::{RoundProfile, StratumProfile};
 use super::provenance::{Asserting, Derivations, RowProvenance};
 use super::{Group, Query, Relation, link_aggregate};
 use crate::graph::{Error, Graph, Result};
@@ -30,6 +32,8 @@ pub(crate) struct Relations {
     /// If the query records its links, the rules asserting triples that
     /// derive each tuple.
     pub asserting: Option<Arc<Asserting>>,
+    /// The components evaluated, in order, and the rounds each took.
+    pub strata: Vec<StratumProfile>,
 }
 
 /// A place in a group: the union and branch taken at each level.
@@ -185,6 +189,7 @@ pub(crate) fn evaluate_over(
         tuples: vec![None; q.relations.len()],
         derivations: None,
         asserting: None,
+        strata: Vec::new(),
     };
     // If the query records its links, so do its rules, and each tuple keeps
     // the provenance of the row that first found it.
@@ -269,6 +274,12 @@ fn evaluate_component(
     asserting: &mut Asserting,
 ) -> Result<()> {
     let record = derivations.is_some();
+    let names = members.iter().map(|r| q.relations[r.0].0.clone()).collect();
+    let mut stratum = StratumProfile {
+        relations: names,
+        rounds: Vec::new(),
+    };
+    let mut round = Instant::now();
     // The rules asserting triples that derive a tuple, each once.
     let mut asserts = |i: usize, r: Relation, row: &[u64]| {
         if record && !q.rules[i].assertions.is_empty() {
@@ -317,7 +328,12 @@ fn evaluate_component(
             }
             set.insert(t);
         }
+        stratum.rounds.push(RoundProfile {
+            new_tuples: set.len() as u64,
+            time: round.elapsed(),
+        });
         relations.tuples[rule.relation.0] = Some(snapshot(&set));
+        relations.strata.push(stratum);
         return Ok(());
     }
     // Each rule's calls to the component.
@@ -348,7 +364,15 @@ fn evaluate_component(
             delta.get_mut(&rule.relation).unwrap().insert(row);
         }
     }
+    let new_tuples = |delta: &HashMap<Relation, HashSet<Vec<u64>>>| {
+        delta.values().map(|d| d.len() as u64).sum::<u64>()
+    };
+    stratum.rounds.push(RoundProfile {
+        new_tuples: new_tuples(&delta),
+        time: round.elapsed(),
+    });
     while delta.values().any(|d| !d.is_empty()) {
+        round = Instant::now();
         let old: HashMap<Relation, Tuples> = known.iter().map(|(&r, s)| (r, snapshot(s))).collect();
         let new: HashMap<Relation, Tuples> = delta.iter().map(|(&r, s)| (r, snapshot(s))).collect();
         for (r, d) in &delta {
@@ -386,9 +410,14 @@ fn evaluate_component(
             }
         }
         delta = next;
+        stratum.rounds.push(RoundProfile {
+            new_tuples: new_tuples(&delta),
+            time: round.elapsed(),
+        });
     }
     for (r, set) in known {
         relations.tuples[r.0] = Some(snapshot(&set));
     }
+    relations.strata.push(stratum);
     Ok(())
 }

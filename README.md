@@ -265,6 +265,8 @@ let (x, y) = (q.var("x"), q.var("y"));
 q.pattern(a, knows, x).pattern(x, knows, y).select([y]);
 let plan = q.plan(&g).unwrap();
 println!("{}", plan.explain());
+let profile = plan.profile(&g).unwrap();          // run it, counting each step
+println!("{} rows in {:?}", profile.rows, profile.time);
 assert_eq!(plan.execute(&g).collect::<Result<Vec<_>, _>>().unwrap(), [[c]]);
 
 // Planned once, run for each person.
@@ -431,6 +433,7 @@ commands:
 | `\info`                     | a summary of the database, with the large index entries' pages and how many are free |
 | `\show ENTRY`               | an entry (`#id`, `/key` or value) and its links   |
 | `\explain STMT`             | the query plan of a `select`, `verify` or `lookup` |
+| `\explain analyze STMT`     | run it, and show each step's actual rows, index entries and time beside the estimates |
 | `\begin`, `\commit`, `\rollback` | transactions                              |
 | `\x`, `\format aligned\|csv\|tsv\|tree`, `\ids`, `\timing` | output settings |
 | `\set [NAME VALUE]`, `\unset NAME` | parameters (`$NAME`); also `-v NAME=VALUE` |

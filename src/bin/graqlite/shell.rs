@@ -33,6 +33,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "\\explain STMT",
         "show the query plan of a select, verify or lookup",
     ),
+    (
+        "\\explain analyze STMT",
+        "run it, and show each step's actual rows and time",
+    ),
     ("\\begin", "start a transaction"),
     ("\\commit", "commit the transaction"),
     ("\\rollback", "discard the transaction"),
@@ -878,6 +882,15 @@ impl Shell {
         if arg.is_empty() {
             return Err("\\explain needs a select, verify or lookup statement".into());
         }
+        let analyze = arg
+            .split_whitespace()
+            .next()
+            .is_some_and(|w| w.eq_ignore_ascii_case("analyze"));
+        let arg = if analyze {
+            arg.trim_start()["analyze".len()..].trim_start()
+        } else {
+            arg
+        };
         let statements = graql::parse(arg).map_err(|e| e.to_string())?;
         for statement in &statements {
             if !matches!(
@@ -898,14 +911,27 @@ impl Shell {
                 Ok(plan) => {
                     let ids = self.style.ids;
                     let g = &self.g;
-                    let text = plan.explain_with(&|id| {
+                    let name = |id: u64| {
                         let name = name_of(g, id, true);
                         if ids && !name.starts_with('#') {
                             format!("{name} #{id}")
                         } else {
                             name
                         }
-                    });
+                    };
+                    let text = if analyze {
+                        match plan.profile(g) {
+                            Ok(profile) => format!(
+                                "{}total: {} rows in {:.3} ms\n",
+                                plan.explain_profile(&profile, &name),
+                                profile.rows,
+                                profile.time.as_secs_f64() * 1000.0
+                            ),
+                            Err(e) => return Err(e.to_string()),
+                        }
+                    } else {
+                        plan.explain_with(&name)
+                    };
                     write!(self.out, "{text}").map_err(|e| e.to_string())?
                 }
                 Err(e) => {

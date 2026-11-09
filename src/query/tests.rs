@@ -3916,7 +3916,7 @@ fn subgraph_and_author_patterns() {
 /// many.
 fn through_index(plan: &mut plan::GroupPlan) -> usize {
     let mut n = 0;
-    for step in &mut plan.steps {
+    for step in Arc::make_mut(&mut plan.steps).iter_mut() {
         match step {
             Step::Pattern {
                 pattern,
@@ -4543,4 +4543,170 @@ fn what_since_and_history_refuse() {
     );
     later.since(horizon);
     assert!(later.run(&g).is_ok());
+}
+
+/// A graph of `n` people each with a type and one of ten cities, the shape
+/// `benches/graql.rs` uses.
+fn people_in_cities(n: u64) -> (Graph, [u64; 3], Vec<u64>) {
+    let mut g = Graph::open(None, Options::for_tuples(n * 3)).unwrap();
+    let [type_, person, city] = ["type", "person", "city"].map(|d| g.value(d.as_bytes()).unwrap());
+    let cities: Vec<u64> = (0..10)
+        .map(|c| g.value(format!("c{c}").as_bytes()).unwrap())
+        .collect();
+    for i in 0..n {
+        let p = g.node().unwrap();
+        g.link(p, type_, person).unwrap();
+        g.link(p, city, cities[(i % 10) as usize]).unwrap();
+    }
+    g.commit().unwrap();
+    (g, [type_, person, city], cities)
+}
+
+#[test]
+fn profiles_count_each_step() {
+    let (g, [type_, person, city], cities) = people_in_cities(200);
+    let mut q = Query::new();
+    let p = q.var("p");
+    q.pattern(p, city, cities[3]);
+    q.pattern(p, type_, person);
+    q.select([p]);
+    let plan = q.plan(&g).unwrap();
+    let profile = plan.profile(&g).unwrap();
+    assert_eq!(profile.rows, 20);
+    assert_eq!(profile.steps.len(), 2);
+    let [first, second] = &profile.steps[..] else {
+        panic!()
+    };
+    assert_eq!((first.actual.rows, first.actual.lookups), (20, 1));
+    assert_eq!(first.actual.entries, 20);
+    assert_eq!(first.actual.runs, 1);
+    assert_eq!((second.actual.rows, second.actual.lookups), (20, 20));
+    assert_eq!(second.actual.entries, 20);
+    assert_eq!(first.estimated_rows.map(f64::round), Some(20.0));
+    assert_eq!(second.estimated_rows.map(f64::round), Some(20.0));
+    // Each step's time is its own: together, no more than the whole.
+    let steps: std::time::Duration = profile.steps.iter().map(|s| s.actual.time).sum();
+    assert!(steps > std::time::Duration::ZERO && steps <= profile.time);
+    let text = plan.explain_profile(&profile, &|id| id.to_string());
+    assert!(
+        text.contains("rows ~20 actual 20, entries ~20 actual 20, 20 lookups"),
+        "{text}"
+    );
+    // A plain explain, and the run itself, are unchanged by profiling.
+    assert!(!plan.explain().contains("actual"));
+    assert_eq!(plan.execute(&g).count(), 20);
+}
+
+#[test]
+fn profiles_count_nested_groups_over_their_runs() {
+    let (g, [type_, person, city], cities) = people_in_cities(50);
+    let mut q = Query::new();
+    let p = q.var("p");
+    q.pattern(p, type_, person);
+    let mut group = Group::new();
+    group.pattern(p, city, cities[0]);
+    let mut other = Group::new();
+    other.pattern(p, city, cities[1]);
+    q.root.union([group, other]);
+    q.select([p]);
+    let plan = plan::plan_with(&q, &g, Some(Join::Bind)).unwrap();
+    let profile = plan.profile(&g).unwrap();
+    assert_eq!(profile.rows, 10);
+    let nested: Vec<_> = profile.steps.iter().filter(|s| s.depth > 0).collect();
+    assert_eq!(nested.len(), 2, "{profile:?}");
+    // Each branch is run for each batch of rows, and adds up over them.
+    for branch in &nested {
+        assert_eq!(branch.actual.rows, 5, "{branch:?}");
+        assert!(branch.actual.runs >= 1, "{branch:?}");
+    }
+    // A branch of a group that no row reaches is said never to have run.
+    let mut q = Query::new();
+    let p = q.var("p");
+    q.pattern(p, city, u64::MAX - 1);
+    let mut group = Group::new();
+    group.pattern(p, type_, person);
+    let mut other = Group::new();
+    other.pattern(p, type_, type_);
+    q.root.union([group, other]);
+    q.select([p]);
+    let plan = plan::plan_with(&q, &g, Some(Join::Bind)).unwrap();
+    let profile = plan.profile(&g).unwrap();
+    let text = plan.explain_profile(&profile, &|id| id.to_string());
+    assert_eq!(profile.rows, 0);
+    assert!(text.contains("never run"), "{text}");
+}
+
+#[test]
+fn profiles_report_a_reduction_and_rule_rounds() {
+    let (g, [type_, person, city], cities) = people_in_cities(100);
+    let mut q = Query::new();
+    let (p, c) = (q.var("p"), q.var("c"));
+    q.pattern(p, type_, person);
+    q.pattern(p, city, c);
+    q.select([p, c]);
+    q.reduction_budget(100_000);
+    let plan = q.plan(&g).unwrap();
+    let profile = plan.profile(&g).unwrap();
+    assert!(profile.reduction.is_some_and(|r| r.entries > 0));
+    assert_eq!(profile.rows, 100);
+    let _ = cities;
+
+    let mut g = Graph::open(None, Options::default()).unwrap();
+    let knows = g.value(b"knows").unwrap();
+    let nodes: Vec<u64> = (0..5).map(|_| g.node().unwrap()).collect();
+    for w in nodes.windows(2) {
+        g.link(w[0], knows, w[1]).unwrap();
+    }
+    g.commit().unwrap();
+    let mut q = Query::new();
+    let reach = q.relation("reach", 2);
+    let (x, y, z) = (q.var("x"), q.var("y"), q.var("z"));
+    let mut base = Group::new();
+    base.pattern(x, knows, y);
+    q.rule(reach, [x, y], base);
+    let mut step = Group::new();
+    step.pattern(x, knows, z);
+    step.call(reach, [z, y]);
+    q.rule(reach, [x, y], step);
+    q.root.call(reach, [x, y]);
+    q.select([x, y]);
+    let plan = q.plan(&g).unwrap();
+    let profile = plan.profile(&g).unwrap();
+    assert_eq!(profile.rows, 10);
+    let [stratum] = &profile.strata[..] else {
+        panic!("{:?}", profile.strata)
+    };
+    assert_eq!(stratum.relations, ["reach"]);
+    let new: Vec<u64> = stratum.rounds.iter().map(|r| r.new_tuples).collect();
+    assert_eq!(new, [4, 3, 2, 1, 0]);
+}
+
+#[test]
+fn estimates_are_near_the_actual_rows_on_the_benches_shape() {
+    let (g, [type_, person, city], cities) = people_in_cities(4000);
+    let near = |q: &Query, factor: f64| {
+        let profile = q.plan(&g).unwrap().profile(&g).unwrap();
+        for s in &profile.steps {
+            let Some(estimate) = s.estimated_rows else {
+                continue;
+            };
+            let (e, a) = (estimate.max(1.0), (s.actual.rows as f64).max(1.0));
+            assert!(e / a <= factor && a / e <= factor, "{s:?}");
+            if let Some(entries) = s.estimated_entries {
+                let (e, a) = (entries.max(1.0), (s.actual.entries as f64).max(1.0));
+                assert!(e / a <= factor && a / e <= factor, "{s:?}");
+            }
+        }
+    };
+    let mut q = Query::new();
+    let p = q.var("p");
+    q.pattern(p, city, cities[2]).pattern(p, type_, person);
+    q.select([p]);
+    near(&q, 1.5);
+    let mut q = Query::new();
+    let (p, c) = (q.var("p"), q.var("c"));
+    q.pattern(p, type_, person).pattern(p, city, c);
+    q.select([p, c]);
+    q.reduction_budget(0);
+    near(&q, 1.5);
 }

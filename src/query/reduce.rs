@@ -112,6 +112,8 @@ pub(crate) struct Reduction {
     pub complete: bool,
     /// The index entries read.
     pub entries: u64,
+    /// The time it took.
+    pub time: std::time::Duration,
 }
 
 /// The candidate links of a pattern.
@@ -449,6 +451,7 @@ pub(crate) fn reduce(
     budget: u64,
     preset: &HashMap<usize, Vec<Link>>,
 ) -> Reduction {
+    let started = std::time::Instant::now();
     let mut filters: HashMap<Var, Vec<&Filter>> = HashMap::new();
     for f in &group.filters {
         let vars: BTreeSet<Var> = f.vars().into_iter().collect();
@@ -484,5 +487,6 @@ pub(crate) fn reduce(
         links,
         complete,
         entries: r.entries,
+        time: started.elapsed(),
     }
 }

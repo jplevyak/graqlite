@@ -8,11 +8,14 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering as AtomicOrdering;
+use std::time::Instant;
 
 use super::aggregate::{self, Cell};
 use super::compute;
 use super::overlay::{self, Shared};
 use super::plan::{Access, GroupPlan, Join, Plan, Step};
+use super::profile::{Profile, Profiler, StepStats};
 use super::provenance::{Recorder, RowProvenance, Support, witness};
 use super::reduce::{Link, live_links_since};
 use super::result::{Derivation, ResultGraph, ResultLink, ResultNode};
@@ -156,6 +159,74 @@ trait Lookup {
     /// returning whether they are all appended.
     fn resume(&mut self, _g: &Graph, _row: &[u64], _out: &mut Batch) -> Result<bool> {
         Ok(true)
+    }
+
+    /// The index entries' ids read so far, if it reads any.
+    fn entries_read(&self) -> u64 {
+        0
+    }
+}
+
+/// A step's operator, counting its rows and the time in it.
+struct ProfiledOperator {
+    inner: Box<dyn Operator>,
+    stats: Arc<StepStats>,
+    profiler: Arc<Profiler>,
+}
+
+impl Operator for ProfiledOperator {
+    fn next(&mut self, g: &Graph, out: &mut Batch) -> Result<()> {
+        // The time in the operators this one calls is theirs, however they
+        // nest: each adds what it took to the count this one takes off.
+        let nested = &self.profiler.nested;
+        let outer = nested.swap(0, AtomicOrdering::Relaxed);
+        let before = out.len();
+        let start = Instant::now();
+        let result = self.inner.next(g, out);
+        let elapsed = start.elapsed().as_nanos() as u64;
+        let inside = nested.swap(outer + elapsed, AtomicOrdering::Relaxed);
+        StepStats::add(&self.stats.nanos, elapsed.saturating_sub(inside));
+        StepStats::add(&self.stats.batches, 1);
+        StepStats::add(&self.stats.rows, (out.len() - before) as u64);
+        result
+    }
+}
+
+/// A step's lookup, counting its lookups and the entries they read.
+struct ProfiledLookup {
+    inner: Box<dyn Lookup>,
+    stats: Arc<StepStats>,
+    /// The entries read when last counted.
+    counted: u64,
+}
+
+impl ProfiledLookup {
+    fn count_entries(&mut self) {
+        let read = self.inner.entries_read();
+        StepStats::add(&self.stats.entries, read - self.counted);
+        self.counted = read;
+    }
+}
+
+impl Lookup for ProfiledLookup {
+    fn matches(&mut self, g: &Graph, row: &[u64], out: &mut Batch) -> Result<()> {
+        StepStats::add(&self.stats.lookups, 1);
+        let result = self.inner.matches(g, row, out);
+        self.count_entries();
+        result
+    }
+
+    fn begin(&mut self, g: &Graph, row: &[u64], out: &mut Batch) -> Result<bool> {
+        StepStats::add(&self.stats.lookups, 1);
+        let result = self.inner.begin(g, row, out);
+        self.count_entries();
+        result
+    }
+
+    fn resume(&mut self, g: &Graph, row: &[u64], out: &mut Batch) -> Result<bool> {
+        let result = self.inner.resume(g, row, out);
+        self.count_entries();
+        result
     }
 }
 
@@ -618,6 +689,8 @@ struct Matcher {
     new: Vec<u64>,
     live: Vec<Link>,
     seen: Vec<[u64; 3]>,
+    /// The index entries' ids read.  Always counted: one addition per id.
+    read: u64,
 }
 
 /// The links of a large index entry, newest first, and the subjects,
@@ -891,10 +964,14 @@ impl Lookup for Matcher {
         let live = if self.overlay.as_ref().is_some_and(|o| !o.over_database()) {
             Vec::new()
         } else if self.reduced.is_some() {
-            self.reduced_links(row)
+            let links = self.reduced_links(row);
+            self.read += links.len() as u64;
+            links
         } else if self.history {
             let (low, high) = self.window();
-            self.candidates(g, row)
+            let candidates = self.candidates(g, row);
+            self.read += candidates.range(low..=high).len() as u64;
+            candidates
                 .range(low..=high)
                 .filter_map(|&id| {
                     let f = g.get(id).ok()?.as_link()?.fields();
@@ -905,7 +982,9 @@ impl Lookup for Matcher {
             // The entry isn't every link of its facts: each link must be
             // its fact's latest.
             let (low, as_of) = self.window();
-            self.candidates(g, row)
+            let candidates = self.candidates(g, row);
+            self.read += candidates.range(low..=as_of).len() as u64;
+            candidates
                 .range(low..=as_of)
                 .filter_map(|&id| {
                     let f = g.get(id).ok()?.as_link()?.fields();
@@ -916,7 +995,10 @@ impl Lookup for Matcher {
                 })
                 .collect()
         } else {
-            live_links_since(g, &self.candidates(g, row), self.as_of, self.since)
+            let (low, high) = self.window();
+            let candidates = self.candidates(g, row);
+            self.read += candidates.range(low..=high).len() as u64;
+            live_links_since(g, &candidates, self.as_of, self.since)
         };
         let live = match &self.overlay {
             None => live,
@@ -978,6 +1060,7 @@ impl Lookup for Matcher {
             if self.since.is_some_and(|s| id <= s) {
                 break;
             }
+            self.read += 1;
             let Ok(record) = g.get(id) else { continue };
             let Some(link) = record.as_link() else {
                 continue;
@@ -1011,6 +1094,7 @@ impl Lookup for Matcher {
             else {
                 return Ok(true);
             };
+            self.read += 1;
             let Ok(record) = g.get(id) else { continue };
             let Some(link) = record.as_link() else {
                 continue;
@@ -1024,6 +1108,10 @@ impl Lookup for Matcher {
         }
         self.stream = Some(stream);
         Ok(false)
+    }
+
+    fn entries_read(&self) -> u64 {
+        self.read
     }
 }
 
@@ -1692,6 +1780,8 @@ struct Context {
     overlay: Option<Shared>,
     /// The hold of the ephemeral ids the query gives, if any.
     hold: Option<crate::graph::EphemeralHold>,
+    /// The counters of a profiled run; see [`Plan::profile`].
+    profiler: Option<Arc<Profiler>>,
 }
 
 /// The values of the parameters given values that are not entries, by slot;
@@ -1720,6 +1810,18 @@ impl Context {
         unit(self.width, &self.start)
     }
 
+    /// `lookup`, counted if this is a profiled run.
+    fn counted(&self, step: &Step, lookup: Box<dyn Lookup>) -> Box<dyn Lookup> {
+        match &self.profiler {
+            Some(p) => Box::new(ProfiledLookup {
+                inner: lookup,
+                stats: p.step(step),
+                counted: 0,
+            }),
+            None => lookup,
+        }
+    }
+
     /// What a group run alone has bound: the parameters.
     fn unbound(&self) -> Vec<bool> {
         self.params.to_vec()
@@ -1735,8 +1837,8 @@ impl Context {
     ) -> Box<dyn Operator> {
         let width = self.width;
         let mut op = input;
-        for step in &plan.steps {
-            op = match step {
+        for step in plan.steps.iter() {
+            let built: Box<dyn Operator> = match step {
                 Step::Pattern {
                     pattern,
                     join,
@@ -1763,22 +1865,26 @@ impl Context {
                     };
                     let scan = |input, bound: &[bool]| BindJoin {
                         input,
-                        matcher: Box::new(Matcher {
-                            pattern: *pattern,
-                            access,
-                            bound: bound.to_vec(),
-                            as_of: pattern.as_of.or(self.as_of),
-                            since: pattern.since.or(self.since),
-                            history: pattern.history || self.history,
-                            overlay: self.overlay.clone(),
-                            reduced: reduced.clone(),
-                            index: None,
-                            candidates: candidates.clone(),
-                            stream: None,
-                            new: Vec::new(),
-                            live: Vec::new(),
-                            seen: Vec::new(),
-                        }),
+                        matcher: self.counted(
+                            step,
+                            Box::new(Matcher {
+                                pattern: *pattern,
+                                access,
+                                bound: bound.to_vec(),
+                                as_of: pattern.as_of.or(self.as_of),
+                                since: pattern.since.or(self.since),
+                                history: pattern.history || self.history,
+                                overlay: self.overlay.clone(),
+                                reduced: reduced.clone(),
+                                index: None,
+                                candidates: candidates.clone(),
+                                stream: None,
+                                new: Vec::new(),
+                                live: Vec::new(),
+                                seen: Vec::new(),
+                                read: 0,
+                            }),
+                        ),
                         in_batch: Batch::new(width),
                         in_pos: 0,
                         pending: Batch::new(width),
@@ -1840,15 +1946,18 @@ impl Context {
                 Step::Path { path, .. } => {
                     let joined = Box::new(BindJoin {
                         input: op,
-                        matcher: marked(
-                            PathLookup {
-                                path: path.clone(),
-                                bound: bound.to_vec(),
-                                as_of: path.as_of.or(self.as_of),
-                                overlay: self.overlay.clone(),
-                                neighbors: HashMap::new(),
-                            },
-                            path.mark,
+                        matcher: self.counted(
+                            step,
+                            marked(
+                                PathLookup {
+                                    path: path.clone(),
+                                    bound: bound.to_vec(),
+                                    as_of: path.as_of.or(self.as_of),
+                                    overlay: self.overlay.clone(),
+                                    neighbors: HashMap::new(),
+                                },
+                                path.mark,
+                            ),
                         ),
                         in_batch: Batch::new(width),
                         in_pos: 0,
@@ -1871,14 +1980,17 @@ impl Context {
                     };
                     let joined = Box::new(BindJoin {
                         input: op,
-                        matcher: marked(
-                            CallLookup {
-                                args: call.args.clone(),
-                                tuples,
-                                bound: bound.to_vec(),
-                                index: None,
-                            },
-                            call.mark,
+                        matcher: self.counted(
+                            step,
+                            marked(
+                                CallLookup {
+                                    args: call.args.clone(),
+                                    tuples,
+                                    bound: bound.to_vec(),
+                                    index: None,
+                                },
+                                call.mark,
+                            ),
                         ),
                         in_batch: Batch::new(width),
                         in_pos: 0,
@@ -1892,14 +2004,17 @@ impl Context {
                 Step::Nearest { nearest, scan, .. } => {
                     let joined = Box::new(BindJoin {
                         input: op,
-                        matcher: Box::new(NearestLookup {
-                            nearest: nearest.clone(),
-                            scan: scan.clone(),
-                            ctx: self.clone(),
-                            bound: bound.to_vec(),
-                            vectors: None,
-                            search: None,
-                        }),
+                        matcher: self.counted(
+                            step,
+                            Box::new(NearestLookup {
+                                nearest: nearest.clone(),
+                                scan: scan.clone(),
+                                ctx: self.clone(),
+                                bound: bound.to_vec(),
+                                vectors: None,
+                                search: None,
+                            }),
+                        ),
                         in_batch: Batch::new(width),
                         in_pos: 0,
                         pending: Batch::new(width),
@@ -1966,6 +2081,18 @@ impl Context {
                     ctx: self.clone(),
                 }),
             };
+            op = match &self.profiler {
+                Some(p) => {
+                    let stats = p.step(step);
+                    StepStats::add(&stats.runs, 1);
+                    Box::new(ProfiledOperator {
+                        inner: built,
+                        stats,
+                        profiler: Arc::clone(p),
+                    })
+                }
+                None => built,
+            };
         }
         op
     }
@@ -2030,6 +2157,30 @@ impl Iterator for Rows<'_> {
 }
 
 impl Plan {
+    /// Runs the plan on `g` to the end, as a query with no parameters, with
+    /// each step counting its rows, lookups, index entries and time, and
+    /// returns those beside the planner's estimates.  The rows are discarded.
+    pub fn profile(&self, g: &Graph) -> Result<Profile> {
+        let profiler = Arc::new(Profiler::default());
+        let mut run = self.clone();
+        run.profiler = Some(Arc::clone(&profiler));
+        let given = Given::Cells(&[]);
+        let start = Instant::now();
+        let rows = if self.query.record {
+            run.graph(g, given, None)?.links.len()
+        } else if self.query.computes() {
+            run.cells(g, given, None)?.len()
+        } else {
+            let mut n = 0;
+            for row in run.rows(g, given, None) {
+                row?;
+                n += 1;
+            }
+            n
+        };
+        Ok(self.profile_of(profiler.counts(), rows as u64, start.elapsed()))
+    }
+
     /// Runs the plan on `g`, which should be the graph it was planned for
     /// (otherwise the results are right but the plan may be slow).  Fails if
     /// the query has [parameters](super::Query::param): see
@@ -2229,6 +2380,7 @@ impl Plan {
             params: self.params.clone(),
             values: values.clone(),
             hold: q.ephemeral_hold().cloned(),
+            profiler: self.profiler.clone(),
         };
         let op = ctx.build(&self.root, ctx.unit(), &mut ctx.unbound());
         Ok(Matched {

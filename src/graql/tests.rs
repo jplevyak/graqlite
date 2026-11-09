@@ -3626,3 +3626,73 @@ fn since_and_history_print() {
     assert!(printed.contains("as of 9"), "{printed}");
     assert!(printed.contains("since 2 history"), "{printed}");
 }
+
+/// The statements of a script, as the shell runs them: a blank line ends a
+/// chunk, and comments and backslash commands are left out.
+fn script_chunks(text: &str) -> Vec<String> {
+    let mut chunks = vec![String::new()];
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('\\') {
+            chunks.push(String::new());
+        } else if !trimmed.starts_with("--") {
+            let last = chunks.last_mut().unwrap();
+            last.push_str(line);
+            last.push('\n');
+        }
+    }
+    chunks.retain(|c| !c.trim().is_empty());
+    chunks
+}
+
+/// Every top-level step of every query in the examples, whose estimate is
+/// loosely right: the examples are small, so this catches a statistics
+/// regression, not a slightly worse guess.
+#[test]
+fn estimates_are_near_the_actual_rows_in_the_examples() {
+    const FACTOR: f64 = 20.0;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let mut scripts: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "graql"))
+        .collect();
+    scripts.sort();
+    let (mut checked, mut worst) = (0, (1.0, String::new()));
+    for script in scripts {
+        let mut g = graph();
+        let mut session = Session::new();
+        for chunk in script_chunks(&std::fs::read_to_string(&script).unwrap()) {
+            // What a script parses only with the shell's help is left out.
+            let Ok(statements) = parse(&chunk) else {
+                continue;
+            };
+            for statement in &statements {
+                if matches!(
+                    statement,
+                    Statement::Select { .. } | Statement::Verify { .. } | Statement::Lookup { .. }
+                ) && let Ok(rules) = session.rules(&g)
+                    && let Ok((q, _)) = statement.query_with(&g, rules)
+                    && let Ok(plan) = q.plan(&g)
+                    && !plan.explain().contains("limit")
+                    && let Ok(profile) = plan.profile(&g)
+                {
+                    for s in profile.steps.iter().filter(|s| s.depth == 0) {
+                        let Some(estimate) = s.estimated_rows else {
+                            continue;
+                        };
+                        let (e, a) = (estimate.max(1.0), (s.actual.rows as f64).max(1.0));
+                        let off = (e / a).max(a / e);
+                        checked += 1;
+                        if off > worst.0 {
+                            worst = (off, format!("{}: {chunk}: {s:?}", script.display()));
+                        }
+                    }
+                }
+                let _ = session.execute(&mut g, &statement.to_string());
+            }
+        }
+    }
+    assert!(checked > 100, "{checked}");
+    assert!(worst.0 <= FACTOR, "{worst:?}");
+}
