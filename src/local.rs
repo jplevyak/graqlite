@@ -18,6 +18,23 @@
 //! reach disk at any time.  The log never reuses an id, so such a reference
 //! names a filler node rather than a different entry (see
 //! [`local_record_log`](crate::local_record_log#ids-are-never-reused)).
+//!
+//! # Durability
+//!
+//! [`Options::synchronous`] says what a commit waits for.  Under
+//! [`Normal`](Synchronous::Normal) and [`Off`](Synchronous::Off) a commit
+//! leaves the indexes to reach the disk when they do, and marks them stale
+//! in the log's metadata with its first such commit; dropping the database
+//! flushes them and clears the mark.
+//!
+//! An index whose pages reached the disk in no particular order can't be
+//! repaired by replaying the entries since some earlier point: a bucket
+//! may link to one that was lost, or a level's count of buckets be older
+//! than the buckets.  So opening a database marked stale deletes its index
+//! files, and the caller rebuilds them from the whole log and calls
+//! [`indexes_rebuilt`](Local::indexes_rebuilt), as
+//! [`Graph::open`](crate::graph::Graph::open) does for the built-in indexes.
+//! A crash during that leaves the mark, and the next open starts again.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -26,7 +43,7 @@ use std::path::{Path, PathBuf};
 use crate::dynamic_table;
 use crate::local_record_log::{self, LocalRecordLog};
 use crate::local_table::{self, LocalTable, TableReader, TableRef};
-use crate::mmap::suffixed;
+use crate::mmap::{self, suffixed};
 use crate::tuple_index::NUM_BUILTIN_INDEXES;
 
 /// Rough sizes for preallocating a database from its expected tuple count.
@@ -91,6 +108,35 @@ impl From<dynamic_table::Error> for Error {
     }
 }
 
+/// What a [commit](Local::commit) waits for, as SQLite's `synchronous`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Synchronous {
+    /// The log and the indexes are flushed: a commit survives losing power,
+    /// and opening the database costs nothing more after a crash.
+    #[default]
+    Full,
+    /// The log is flushed and the indexes are not.  A commit survives
+    /// losing power, but opening the database after a crash rebuilds the
+    /// indexes from the log.
+    Normal,
+    /// Nothing is flushed, for bulk loads and tests.  A commit survives the
+    /// process being killed, with the indexes rebuilt as under `Normal`, but
+    /// losing power may lose or corrupt the database.
+    Off,
+}
+
+impl Synchronous {
+    /// The level called `name`: `full`, `normal` or `off`.
+    pub fn of_name(name: &str) -> Option<Self> {
+        match name {
+            "full" => Some(Synchronous::Full),
+            "normal" => Some(Synchronous::Normal),
+            "off" => Some(Synchronous::Off),
+            _ => None,
+        }
+    }
+}
+
 /// Options for opening a database.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -104,6 +150,8 @@ pub struct Options {
     /// when [`Graph::tick`](crate::graph::Graph::tick) compacts them; `None`
     /// keeps it all, so every `as of` can be answered.
     pub history: Option<u64>,
+    /// What a commit waits for.
+    pub synchronous: Synchronous,
 }
 
 impl Default for Options {
@@ -114,6 +162,7 @@ impl Default for Options {
             index: dynamic_table::Options::default(),
             tables: NUM_BUILTIN_INDEXES,
             history: None,
+            synchronous: Synchronous::Full,
         }
     }
 }
@@ -163,15 +212,40 @@ pub struct Local {
     /// A reader's (see [`reader`](Local::reader)) readers of the tables, in
     /// place of `indexes`.
     readers: Vec<TableReader>,
+    /// Whether this session's commits left the indexes to be flushed when
+    /// it is dropped.
+    unsynced: bool,
+}
+
+impl Drop for Local {
+    /// Flushes indexes that commits left unflushed, so that the next open
+    /// need not rebuild them.  If that fails, it will.
+    fn drop(&mut self) {
+        if self.unsynced {
+            let _ = self.sync_indexes();
+        }
+    }
 }
 
 impl Local {
     /// Opens or creates the database whose files start with `prefix`, or an
-    /// in-memory database if `prefix` is `None`.
-    pub fn open(prefix: Option<&Path>, options: Options) -> Result<Self> {
+    /// in-memory database if `prefix` is `None`.  If its indexes are
+    /// [stale](Self::indexes_stale), it has none until they are rebuilt.
+    pub fn open(prefix: Option<&Path>, mut options: Options) -> Result<Self> {
+        options.log.flush = options.synchronous != Synchronous::Off;
         let mut log = LocalRecordLog::open(prefix.map(log_prefix).as_deref(), options.log.clone())?;
         if log.has_pending_commit() {
             log.abandon_commit()?;
+        }
+        if log.metadata().indexes_stale
+            && let Some(p) = prefix
+        {
+            // Before opening them: they may not even parse.
+            let mut i = 0;
+            while i < options.tables || local_table::exists(&index_prefix(p, i)) {
+                local_table::remove(&index_prefix(p, i))?;
+                i += 1;
+            }
         }
         let mut local = Local {
             prefix: prefix.map(Path::to_path_buf),
@@ -179,6 +253,7 @@ impl Local {
             log,
             indexes: Vec::new(),
             readers: Vec::new(),
+            unsynced: false,
         };
         while local.indexes.len() < local.options.tables
             || local
@@ -207,7 +282,48 @@ impl Local {
             } else {
                 self.indexes.iter().map(LocalTable::reader).collect()
             },
+            unsynced: false,
         }
+    }
+
+    /// Whether a promotion in a table must flush its tree: not if a crash
+    /// would have the table rebuilt.
+    fn tables_ordered(&self) -> bool {
+        self.options.synchronous == Synchronous::Full && !self.log.metadata().indexes_stale
+    }
+
+    /// Whether the indexes may not cover the log, after a crash under
+    /// [`Normal`](Synchronous::Normal) or [`Off`](Synchronous::Off): they
+    /// must be rebuilt from the log.
+    pub fn indexes_stale(&self) -> bool {
+        self.log.metadata().indexes_stale
+    }
+
+    /// Records that the indexes, rebuilt from the log, cover it again.
+    pub fn indexes_rebuilt(&mut self) -> Result<()> {
+        self.sync_indexes()?;
+        let ordered = self.tables_ordered();
+        for index in &mut self.indexes {
+            index.set_ordered(ordered);
+        }
+        Ok(())
+    }
+
+    /// Flushes the indexes and clears the mark that they may not cover the
+    /// log.  In that order: a crash between them only rebuilds them.
+    fn sync_indexes(&mut self) -> Result<()> {
+        for index in &mut self.indexes {
+            index.sync()?;
+        }
+        self.log.clear_indexes_stale()?;
+        self.unsynced = false;
+        Ok(())
+    }
+
+    /// Makes dropping this session like a crash: nothing more is flushed.
+    #[cfg(test)]
+    pub(crate) fn crash(&mut self) {
+        self.unsynced = false;
     }
 
     /// Whether this is a reader (see [`reader`](Self::reader)).
@@ -229,10 +345,9 @@ impl Local {
         self.check_writer()?;
         let i = self.indexes.len();
         let prefix = self.prefix.as_ref().map(|p| index_prefix(p, i));
-        self.indexes.push(LocalTable::open(
-            prefix.as_deref(),
-            self.options.index.clone(),
-        )?);
+        let mut table = LocalTable::open(prefix.as_deref(), self.options.index.clone())?;
+        table.set_ordered(self.tables_ordered());
+        self.indexes.push(table);
         Ok(i)
     }
 
@@ -279,10 +394,37 @@ impl Local {
         &mut self.indexes[i]
     }
 
-    /// Commits the log's appended entries, with the indexes flushed so that
-    /// they cover them.
+    /// Commits the log's appended entries.  Under
+    /// [`Full`](Synchronous::Full) the indexes are flushed so that they
+    /// cover them; otherwise they are left stale.  A commit with nothing to
+    /// do makes no system call.
     pub fn commit(&mut self) -> Result<()> {
         self.check_writer()?;
+        if self.options.synchronous != Synchronous::Full {
+            if self.log.is_clean() {
+                return Ok(());
+            }
+            // Not if they were stale already: then they were found so, and
+            // only rebuilding them can clear the mark.
+            if !self.indexes_stale() {
+                self.unsynced = !self.is_transient();
+            }
+            self.log.set_indexes_stale();
+            self.log.commit()?;
+            return Ok(());
+        }
+        if self.log.is_clean() && !self.indexes.iter().any(LocalTable::is_dirty) {
+            return Ok(());
+        }
+        // Once, and first: a commit's metadata must not reach the disk
+        // before the names of the files it needs.
+        if self.log.dir_dirty() || self.indexes.iter().any(LocalTable::dir_dirty) {
+            if let Some(p) = &self.prefix {
+                mmap::sync_dir(&log_prefix(p))?;
+            }
+            self.log.dir_synced();
+            self.indexes.iter_mut().for_each(LocalTable::dir_synced);
+        }
         self.log.start_commit()?;
         for index in &mut self.indexes {
             index.sync()?;
@@ -366,7 +508,12 @@ impl Local {
     /// Creates a database at `prefix`, or in memory if `prefix` is `None`,
     /// from a [`snapshot`](Self::snapshot) read from `input`.  Fails if a
     /// database exists at `prefix`.
-    pub fn restore(prefix: Option<&Path>, options: Options, input: &mut impl Read) -> Result<Self> {
+    pub fn restore(
+        prefix: Option<&Path>,
+        mut options: Options,
+        input: &mut impl Read,
+    ) -> Result<Self> {
+        options.log.flush = options.synchronous != Synchronous::Off;
         if prefix.is_some_and(exists) {
             return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
         }
@@ -419,7 +566,12 @@ impl Local {
                 log,
                 indexes,
                 readers: Vec::new(),
+                unsynced: false,
             };
+            let ordered = local.tables_ordered();
+            for index in &mut local.indexes {
+                index.set_ordered(ordered);
+            }
             while local.indexes.len() < local.options.tables {
                 local.new_table()?;
             }

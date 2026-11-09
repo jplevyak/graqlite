@@ -506,6 +506,9 @@ pub struct LocalTable {
     postings: Postings,
     /// The header pages of keys found promoted.
     promoted: HashMap<(u64, u64), u64>,
+    /// Whether a promotion flushes its tree before a bucket names it; see
+    /// [`set_ordered`](Self::set_ordered).
+    ordered: bool,
 }
 
 impl Lookups for LocalTable {
@@ -530,9 +533,16 @@ impl LocalTable {
             writer: Writer::open(prefix, options)?,
             postings: Postings::open(prefix)?,
             promoted: HashMap::new(),
+            ordered: true,
         };
         t.reclaim_unnamed();
         Ok(t)
+    }
+
+    /// Whether a promotion flushes its tree before a bucket names it, as it
+    /// must unless a crash would have the table rebuilt.  It is by default.
+    pub fn set_ordered(&mut self, ordered: bool) {
+        self.ordered = ordered;
     }
 
     /// Frees the pages of every tree no bucket names: left by compaction,
@@ -596,7 +606,9 @@ impl LocalTable {
         ids.dedup();
         let h = self.postings.create(&ids)?;
         self.postings.set_key(h, (k, k2));
-        self.postings.sync()?;
+        if self.ordered {
+            self.postings.sync()?;
+        }
         self.writer.replace(k, k2, true, &[h])?;
         self.promoted.insert((k, k2), h);
         Ok(())
@@ -709,6 +721,22 @@ impl LocalTable {
         self.writer.sync()
     }
 
+    /// Whether anything was written since the last [`sync`](Self::sync).
+    pub fn is_dirty(&self) -> bool {
+        self.writer.is_dirty() || self.postings.is_dirty()
+    }
+
+    /// Whether the directory needs flushing for this table's files.
+    pub fn dir_dirty(&self) -> bool {
+        self.writer.dir_dirty() || self.postings.dir_dirty()
+    }
+
+    /// Notes that the caller flushed the directory.
+    pub fn dir_synced(&mut self) {
+        self.writer.dir_synced();
+        self.postings.dir_synced();
+    }
+
     /// Writes a snapshot of the table to `sink`: the dynamic table's chunks
     /// (see [`Writer::snapshot`]), then the postings'.
     pub fn snapshot(&mut self, mut sink: impl FnMut(&[u8]) -> io::Result<()>) -> Result<()> {
@@ -735,6 +763,7 @@ impl LocalTable {
             writer,
             postings,
             promoted: HashMap::new(),
+            ordered: true,
         };
         t.reclaim_unnamed();
         Ok(t)

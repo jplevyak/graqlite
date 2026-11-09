@@ -308,6 +308,41 @@ fn parameters_from_the_command_line() {
 }
 
 #[test]
+fn synchronous() {
+    let dir = std::env::temp_dir().join(format!("graqlite-cli-sync-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let db = dir.to_str().unwrap();
+    for level in ["full", "normal", "off"] {
+        let (out, status) = run(
+            &[
+                "-q",
+                "--synchronous",
+                level,
+                "-c",
+                &format!("insert /{level} p 1"),
+                db,
+            ],
+            "",
+        );
+        assert_eq!((out.as_str(), status), ("INSERT 1\n", 0));
+    }
+    let (out, status) = run(&["-q", "--csv", "-c", "select ?s where ?s p 1", db], "");
+    assert_eq!(status, 0, "{out}");
+    for level in ["full", "normal", "off"] {
+        assert!(out.contains(level), "{level} is missing from {out}");
+    }
+    fs::remove_dir_all(&dir).unwrap();
+    let (out, status) = run(&["--synchronous", "sometimes"], "");
+    assert_eq!(
+        (out.as_str(), status),
+        (
+            "graqlite: --synchronous takes full, normal or off, not sometimes\n",
+            2
+        )
+    );
+}
+
+#[test]
 fn options() {
     let (out, status) = run(&["--help"], "");
     assert_eq!(status, 0);

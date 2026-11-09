@@ -1505,3 +1505,95 @@ fn live_links_of_many_facts_newest_first() {
     assert_eq!(then.len(), 80);
     assert_eq!(then.last(), Some(&before));
 }
+
+/// Commits links enough to promote an index entry, appends more without
+/// committing, and crashes with the index files ruined, as losing power
+/// with them half written could: reopening finds the commit, rebuilt.
+fn crash_and_rebuild(synchronous: Synchronous, name: &str) {
+    let dir = TempDir::new(name);
+    let prefix = dir.prefix("g");
+    let options = || Options {
+        synchronous,
+        ..Options::default()
+    };
+    let mut g = Graph::open(Some(&prefix), options()).unwrap();
+    let a = g.node_by_key(b"/a").unwrap();
+    let p = g.value(b"p").unwrap();
+    let objects: Vec<u64> = (0..200)
+        .map(|i| {
+            let o = g.value(format!("v{i}").as_bytes()).unwrap();
+            g.link(a, p, o).unwrap();
+            o
+        })
+        .collect();
+    g.commit().unwrap();
+    assert!(g.local.indexes_stale());
+    g.value(b"never committed").unwrap();
+    g.local.crash();
+    drop(g);
+
+    let mut ruined = 0;
+    for file in fs::read_dir(&dir.0).unwrap() {
+        let path = file.unwrap().path();
+        if path.to_str().unwrap().contains("g.index") {
+            ruined += 1;
+            if ruined % 2 == 0 {
+                fs::remove_file(&path).unwrap();
+            } else {
+                fs::write(&path, b"not an index").unwrap();
+            }
+        }
+    }
+    assert!(ruined >= 9);
+
+    // Interrupted before the rebuild finishes: the mark stays.
+    let mut local = Local::open(Some(&prefix), options()).unwrap();
+    assert!(local.indexes_stale());
+    local.crash();
+    drop(local);
+
+    let mut g = Graph::open(Some(&prefix), options()).unwrap();
+    assert!(!g.local.indexes_stale());
+    assert_eq!(g.find_by_key(b"/a"), Some(a));
+    assert_eq!(g.find_value(b"never committed"), None);
+    for (i, &o) in objects.iter().enumerate() {
+        assert_eq!(g.find_value(format!("v{i}").as_bytes()), Some(o));
+        assert!(g.find_link(a, p, o).is_some());
+    }
+    // It goes on working, the rebuilt indexes being written and flushed.
+    let o = g.value(b"after").unwrap();
+    g.link(a, p, o).unwrap();
+    g.commit().unwrap();
+    drop(g);
+    let g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    assert!(!g.local.indexes_stale());
+    assert!(g.find_link(a, p, o).is_some());
+}
+
+#[test]
+fn a_crash_under_normal_rebuilds_the_indexes() {
+    crash_and_rebuild(Synchronous::Normal, "crash-normal");
+}
+
+#[test]
+fn a_crash_under_off_rebuilds_the_indexes() {
+    crash_and_rebuild(Synchronous::Off, "crash-off");
+}
+
+#[test]
+fn opening_under_full_rebuilds_after_a_crash_under_normal() {
+    let dir = TempDir::new("crash-then-full");
+    let prefix = dir.prefix("g");
+    let options = Options {
+        synchronous: Synchronous::Normal,
+        ..Options::default()
+    };
+    let mut g = Graph::open(Some(&prefix), options).unwrap();
+    let a = g.node_by_key(b"/a").unwrap();
+    g.commit().unwrap();
+    g.local.crash();
+    drop(g);
+    let g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    assert!(!g.local.indexes_stale());
+    assert_eq!(g.find_by_key(b"/a"), Some(a));
+}

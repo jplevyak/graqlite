@@ -3,10 +3,11 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::io;
+use std::ops::Range;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn check(r: libc::c_int) -> io::Result<()> {
     if r < 0 {
@@ -31,6 +32,11 @@ pub fn round_up_to_page(n: u64) -> u64 {
 pub struct Mapping {
     ptr: *mut u8,
     len: usize,
+    /// The lowest offset [marked](Self::mark_dirty) since the last
+    /// [`sync_dirty`](Self::sync_dirty), `u64::MAX` if none is.
+    dirty_low: AtomicU64,
+    /// The end of the highest range marked, 0 if none is.
+    dirty_high: AtomicU64,
 }
 
 // SAFETY: the mapping is only accessed through atomics or by the single writer.
@@ -57,6 +63,8 @@ impl Mapping {
         Ok(Mapping {
             ptr: ptr.cast(),
             len,
+            dirty_low: AtomicU64::new(u64::MAX),
+            dirty_high: AtomicU64::new(0),
         })
     }
 
@@ -123,16 +131,60 @@ impl Mapping {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.add(offset as usize), len as usize) }
     }
 
-    /// Flushes the first `len` bytes to the file.
-    pub fn sync(&self, len: u64) -> io::Result<()> {
-        // SAFETY: the range lies within this mapping.
+    /// Flushes the bytes of `range` to the file, with the rest of the pages
+    /// they are on.  An empty range makes no system call.
+    pub fn sync(&self, range: Range<u64>) -> io::Result<()> {
+        let end = range.end.min(self.len as u64);
+        if range.start >= end {
+            return Ok(());
+        }
+        let start = range.start - range.start % page_size();
+        // SAFETY: the range lies within this mapping, from a page boundary.
         check(unsafe {
             libc::msync(
-                self.ptr.cast(),
-                len.min(self.len as u64) as usize,
+                self.ptr.add(start as usize).cast(),
+                (end - start) as usize,
                 libc::MS_SYNC,
             )
         })
+    }
+
+    /// Records that the `len` bytes at `offset` were written, for the next
+    /// [`sync_dirty`](Self::sync_dirty).  For the mapping's single writer:
+    /// the two words are loaded and stored, not updated atomically.
+    pub fn mark_dirty(&self, offset: u64, len: u64) {
+        if len == 0 {
+            return;
+        }
+        if offset < self.dirty_low.load(Ordering::Relaxed) {
+            self.dirty_low.store(offset, Ordering::Relaxed);
+        }
+        if offset + len > self.dirty_high.load(Ordering::Relaxed) {
+            self.dirty_high.store(offset + len, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether anything was [marked](Self::mark_dirty) since the last
+    /// [`sync_dirty`](Self::sync_dirty).
+    pub fn is_dirty(&self) -> bool {
+        self.dirty_low.load(Ordering::Relaxed) < self.dirty_high.load(Ordering::Relaxed)
+    }
+
+    /// Flushes from the lowest offset marked to the end of the highest, and
+    /// forgets them if that succeeds.  With none marked, it makes no system
+    /// call.
+    ///
+    /// One range, however far apart the writes, as each `msync` that writes
+    /// waits for the device: one call over a hash table's scattered buckets
+    /// is cheaper than one per page.
+    pub fn sync_dirty(&self) -> io::Result<()> {
+        if !self.is_dirty() {
+            return Ok(());
+        }
+        self.sync(self.dirty_low.load(Ordering::Relaxed)..self.dirty_high.load(Ordering::Relaxed))?;
+        self.dirty_low.store(u64::MAX, Ordering::Relaxed);
+        self.dirty_high.store(0, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -195,7 +247,6 @@ pub fn ephemeral_file(name: &str) -> io::Result<File> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        use std::sync::atomic::Ordering;
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "{name}-{}-{}",
@@ -217,4 +268,32 @@ pub fn ephemeral_file(name: &str) -> io::Result<File> {
 pub fn lock_exclusive(file: &File) -> io::Result<()> {
     // SAFETY: plain syscall on an open file.
     check(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dirty_ranges() {
+        let file = ephemeral_file("graqlite-dirty").unwrap();
+        let size = 4 * page_size();
+        allocate(&file, size).unwrap();
+        let map = Mapping::new(&file, size).unwrap();
+        assert!(!map.is_dirty());
+        map.sync_dirty().unwrap();
+        map.mark_dirty(100, 0);
+        assert!(!map.is_dirty());
+        // Neither end on a page boundary, which msync would refuse.
+        map.mark_dirty(page_size() + 8, 8);
+        map.mark_dirty(2 * page_size() + 8, 8);
+        map.mark_dirty(page_size() + 16, 8);
+        assert!(map.is_dirty());
+        map.sync_dirty().unwrap();
+        assert!(!map.is_dirty());
+        map.sync(page_size() + 1..page_size() + 2).unwrap();
+        map.sync(5..5).unwrap();
+        // Past the mapping is cut off at its end.
+        map.sync(page_size()..u64::MAX).unwrap();
+    }
 }

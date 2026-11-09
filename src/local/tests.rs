@@ -293,3 +293,96 @@ fn sizing() {
     let local = Local::open(None, options).unwrap();
     assert_eq!(local.table_count(), crate::tuple_index::NUM_BUILTIN_INDEXES);
 }
+
+#[test]
+fn only_what_changed_is_dirty() {
+    let dir = TempDir::new("dirty");
+    let prefix = dir.prefix("db");
+    let mut local = Local::open(Some(&prefix), three_indexes()).unwrap();
+    // A new database's first commit flushes it all, and then it is clean.
+    local.commit().unwrap();
+    assert!(local.log().is_clean());
+    assert!(!(0..3).any(|i| local.table_mut(i).is_dirty()));
+
+    let id = local.log_mut().push_value(b"one").unwrap();
+    local.table_mut(SUBJECTS).insert(id, [id]).unwrap();
+    assert!(!local.log().is_clean());
+    assert!(local.table_mut(SUBJECTS).is_dirty());
+    assert!(!local.table_mut(OBJECTS).is_dirty());
+    assert!(!local.table_mut(VALUES).is_dirty());
+    assert!(!local.table_mut(SUBJECTS).dir_dirty());
+    local.commit().unwrap();
+    assert!(local.log().is_clean());
+    assert!(!local.table_mut(SUBJECTS).is_dirty());
+
+    // Reopened, each table counts as dirty until its first commit: a crash
+    // may have left its pages unflushed.
+    drop(local);
+    let mut local = Local::open(Some(&prefix), three_indexes()).unwrap();
+    assert!(local.table_mut(OBJECTS).is_dirty());
+    local.commit().unwrap();
+    assert!(!local.table_mut(OBJECTS).is_dirty());
+    assert_eq!(local.table(SUBJECTS).find(id).len(), 1);
+}
+
+#[test]
+fn full_never_marks_the_indexes_stale() {
+    let dir = TempDir::new("full");
+    let prefix = dir.prefix("db");
+    let mut local = Local::open(Some(&prefix), three_indexes()).unwrap();
+    local.log_mut().push_value(b"one").unwrap();
+    local.commit().unwrap();
+    assert!(!local.indexes_stale());
+}
+
+#[test]
+fn normal_leaves_the_indexes_stale_until_dropped() {
+    let dir = TempDir::new("normal");
+    let prefix = dir.prefix("db");
+    let options = || Options {
+        synchronous: Synchronous::Normal,
+        ..three_indexes()
+    };
+    let mut local = Local::open(Some(&prefix), options()).unwrap();
+    assert!(!local.indexes_stale());
+    let id = local.log_mut().push_value(b"one").unwrap();
+    local.table_mut(SUBJECTS).insert(id, [id]).unwrap();
+    local.commit().unwrap();
+    assert!(local.indexes_stale());
+    assert!(local.table_mut(SUBJECTS).is_dirty());
+    drop(local);
+    // Flushed when dropped, so nothing needs rebuilding.
+    let local = Local::open(Some(&prefix), options()).unwrap();
+    assert!(!local.indexes_stale());
+    assert_eq!(local.table(SUBJECTS).find(id).len(), 1);
+}
+
+#[test]
+fn only_rebuilding_clears_a_stale_mark_found_on_opening() {
+    let dir = TempDir::new("stale");
+    let prefix = dir.prefix("db");
+    let options = || Options {
+        synchronous: Synchronous::Normal,
+        ..three_indexes()
+    };
+    let mut local = Local::open(Some(&prefix), options()).unwrap();
+    local.log_mut().push_value(b"one").unwrap();
+    local.commit().unwrap();
+    local.crash();
+    drop(local);
+    // Committing and closing without rebuilding must not hide the loss.
+    let mut local = Local::open(Some(&prefix), options()).unwrap();
+    assert!(local.indexes_stale());
+    local.log_mut().push_value(b"two").unwrap();
+    local.commit().unwrap();
+    drop(local);
+    let mut local = Local::open(Some(&prefix), options()).unwrap();
+    assert!(local.indexes_stale());
+    local.indexes_rebuilt().unwrap();
+    drop(local);
+    assert!(
+        !Local::open(Some(&prefix), options())
+            .unwrap()
+            .indexes_stale()
+    );
+}

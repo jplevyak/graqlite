@@ -1,6 +1,6 @@
 # Bulk loading from files
 
-**Status:** open · **Size:** medium · **Related:** [021](021-commit-cost.md) (one commit, and `synchronous`), [020](closed/020-shell-reparses-long-statements.md) (the other reason loading is slow), [032](032-rdf-and-sparql.md) (RDF formats use this)
+**Status:** open · **Size:** medium · **Related:** [021](closed/021-commit-cost.md) (one commit, and `synchronous`), [020](closed/020-shell-reparses-long-statements.md) (the other reason loading is slow), [032](032-rdf-and-sparql.md) (RDF formats use this)
 
 ## Motivation
 

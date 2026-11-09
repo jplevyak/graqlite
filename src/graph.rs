@@ -112,8 +112,8 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-pub use crate::local::Options;
 use crate::local::{self, Local};
+pub use crate::local::{Options, Synchronous};
 use crate::local_record_log::{self, Records};
 use crate::local_table::IdSet;
 use crate::record::{Link, LinkFields, LinkState, Linkage, Record, now};
@@ -524,7 +524,12 @@ impl Graph {
     /// in-memory graph if `prefix` is `None`.
     pub fn open(prefix: Option<&Path>, mut options: Options) -> Result<Self> {
         options.tables = options.tables.max(NUM_BUILTIN_INDEXES);
-        Self::with_stats(Local::open(prefix, options)?)
+        let mut local = Local::open(prefix, options)?;
+        if local.indexes_stale() {
+            tuple_index::reindex(&mut local)?;
+            local.indexes_rebuilt()?;
+        }
+        Self::with_stats(local)
     }
 
     /// The graph of `local`, loading its statistics and counting the entries

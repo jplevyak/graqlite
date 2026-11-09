@@ -10,7 +10,7 @@ use std::io::{self, BufReader, IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use graqlite::graph::{self, Graph, Options};
+use graqlite::graph::{self, Graph, Options, Synchronous};
 use graqlite::graql;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -42,6 +42,11 @@ Options:
                         instead of one in DIR
       --restore FILE    create the database from the snapshot in FILE
                         (see \\dump); it must not exist already
+      --synchronous LEVEL
+                        what a commit waits for: full (the default), normal
+                        (the log; after a crash, opening rebuilds the
+                        indexes) or off (nothing; a power cut may lose the
+                        database)
       --csv             print results as CSV
       --tsv             print results as tab separated values
   -x, --expanded        print each field of a row on a line of its own
@@ -72,6 +77,7 @@ struct Args {
     inputs: Vec<Input>,
     single_transaction: bool,
     restore: Option<PathBuf>,
+    synchronous: Synchronous,
     style: Style,
     quiet: bool,
     /// Parameters, as `NAME VALUE` for `\set`.
@@ -85,6 +91,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         inputs: Vec::new(),
         single_transaction: false,
         restore: None,
+        synchronous: Synchronous::Full,
         style: Style {
             format: Format::Aligned,
             expanded: false,
@@ -133,6 +140,12 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.raw_prefix = true;
             }
             "--restore" => args.restore = Some(value(&arg)?.into()),
+            "--synchronous" => {
+                let level = value(&arg)?;
+                args.synchronous = Synchronous::of_name(&level).ok_or_else(|| {
+                    format!("--synchronous takes full, normal or off, not {level}")
+                })?;
+            }
             "--csv" => args.style.format = Format::Csv,
             "--tsv" => args.style.format = Format::Tsv,
             "-x" | "--expanded" => args.style.expanded = true,
@@ -168,6 +181,10 @@ fn open(args: &Args) -> Result<Graph, String> {
         Some(p) => p.display().to_string(),
         None => "the database".into(),
     };
+    let options = || Options {
+        synchronous: args.synchronous,
+        ..Options::default()
+    };
     if let Some(snapshot) = &args.restore {
         if let Some(p) = &prefix
             && graph::exists(p)
@@ -176,15 +193,11 @@ fn open(args: &Args) -> Result<Graph, String> {
         }
         let file =
             File::open(snapshot).map_err(|e| format!("opening {}: {e}", snapshot.display()))?;
-        return Graph::restore(
-            prefix.as_deref(),
-            Options::default(),
-            &mut BufReader::new(file),
-        )
-        .map_err(|e| format!("restoring {}: {e}", snapshot.display()));
+        return Graph::restore(prefix.as_deref(), options(), &mut BufReader::new(file))
+            .map_err(|e| format!("restoring {}: {e}", snapshot.display()));
     }
     let created = prefix.as_ref().is_some_and(|p| !graph::exists(p));
-    let g = Graph::open(prefix.as_deref(), Options::default())
+    let g = Graph::open(prefix.as_deref(), options())
         .map_err(|e| format!("opening {}: {e} (is it open in another process?)", name()))?;
     if created && !args.quiet {
         eprintln!("created a new database in {}", name());

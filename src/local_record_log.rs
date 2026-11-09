@@ -28,7 +28,8 @@
 //!
 //! If a crash interrupts a commit, the reopened log has `pre_next_id` beyond
 //! `next_id`, and the entries up to `pre_next_id` are intact on disk; the
-//! caller decides whether to complete or abandon the commit.
+//! caller decides whether to complete or abandon the commit.  With no other
+//! state to commit, [`commit`](LocalRecordLog::commit) does both at once.
 //!
 //! # Ids are never reused
 //!
@@ -132,6 +133,9 @@ pub struct Options {
     pub create_size: u64,
     /// The least address space reserved for each data file.
     pub min_file_reserve: u64,
+    /// Whether commits flush the log to disk.  If not, they survive the
+    /// process but not the machine.
+    pub flush: bool,
 }
 
 impl Default for Options {
@@ -140,6 +144,7 @@ impl Default for Options {
             start_id: 1,
             create_size: 0,
             min_file_reserve: 1 << 30,
+            flush: true,
         }
     }
 }
@@ -158,6 +163,9 @@ pub struct Metadata {
     pub pre_next_id: u64,
     /// No id at or beyond this has been handed out.
     pub reserved_id: u64,
+    /// Whether commits were made that the state committed beside the log
+    /// (a [`Local`](crate::local::Local)'s indexes) may not cover.
+    pub indexes_stale: bool,
 }
 
 /// Whether a log exists at `prefix`.
@@ -217,6 +225,8 @@ enum Word {
     NextId,
     PreNextId,
     ReservedId,
+    /// 0, as in a log made before this word was, or 1.
+    IndexesStale,
 }
 
 struct MetadataFile {
@@ -249,16 +259,21 @@ impl MetadataFile {
             next_id: self.load(Word::NextId),
             pre_next_id: self.load(Word::PreNextId),
             reserved_id: self.load(Word::ReservedId),
+            indexes_stale: self.load(Word::IndexesStale) != 0,
         }
     }
 
+    /// Stores `m`.  The ids go in the order that keeps them valid if the
+    /// process dies part way: `next_id <= pre_next_id <= reserved_id`, where
+    /// a commit raises the first two and may lower the last to no less.
     fn write(&self, m: &Metadata) {
         self.store(Word::Uuid0, m.uuid.uuid0);
         self.store(Word::Uuid1, m.uuid.uuid1);
         self.store(Word::StartId, m.start_id);
-        self.store(Word::NextId, m.next_id);
         self.store(Word::PreNextId, m.pre_next_id);
+        self.store(Word::NextId, m.next_id);
         self.store(Word::ReservedId, m.reserved_id);
+        self.store(Word::IndexesStale, u64::from(m.indexes_stale));
     }
 }
 
@@ -327,6 +342,7 @@ impl LocalRecordLog {
                 next_id: options.start_id,
                 pre_next_id: options.start_id,
                 reserved_id: options.start_id,
+                indexes_stale: false,
             }
         } else {
             meta_file.read()
@@ -509,7 +525,13 @@ impl LocalRecordLog {
         let end = self.next.saturating_add(max_len as u64);
         if end > self.meta.reserved_id {
             self.meta.reserved_id = end.next_multiple_of(RESERVE_STEP);
-            self.write_metadata()?;
+            if self.meta.indexes_stale {
+                // The reservation keeps an index from naming a reused id,
+                // and stale indexes are rebuilt after a crash: no flush.
+                self.meta_file.write(&self.meta);
+            } else {
+                self.write_metadata()?;
+            }
         }
         let id = self.next;
         let n = encode(self.room(max_len as u64)?, id)?;
@@ -629,23 +651,81 @@ impl LocalRecordLog {
         Records { log: self, id }
     }
 
-    /// Flushes the entries from file `first` on to disk.
-    fn sync_files(&self, first: usize) -> Result<()> {
-        if self.is_transient() {
+    /// Whether this log's commits reach the disk.
+    fn flushes(&self) -> bool {
+        self.options.flush && !self.is_transient()
+    }
+
+    /// Flushes the entries since the last commit to disk, and a new file's
+    /// header with them.
+    fn sync_files(&self) -> Result<()> {
+        if !self.flushes() {
             return Ok(());
         }
-        for f in &self.files[first..] {
-            f.map.sync(f.len)?;
+        let committed = self.meta.next_id;
+        let first = self.files.partition_point(|f| f.start_id <= committed) - 1;
+        for (i, f) in self.files.iter().enumerate().skip(first) {
+            let start = if f.start_id < committed {
+                HEADER + (committed - f.start_id)
+            } else {
+                0
+            };
+            f.map
+                .sync(start..HEADER + (self.file_end(i) - f.start_id))?;
         }
+        Ok(())
+    }
+
+    /// Flushes the entries, and the directory if files were created.
+    fn flush_entries(&mut self) -> Result<()> {
+        self.sync_files()?;
+        if self.dir_dirty
+            && self.options.flush
+            && let Some(p) = &self.prefix
+        {
+            mmap::sync_dir(p)?;
+        }
+        self.dir_dirty = false;
         Ok(())
     }
 
     fn write_metadata(&mut self) -> Result<()> {
         self.meta_file.write(&self.meta);
-        if !self.is_transient() {
-            self.meta_file.map.sync(METADATA_SIZE)?;
+        if self.flushes() {
+            self.meta_file.map.sync(0..METADATA_SIZE)?;
         }
         Ok(())
+    }
+
+    /// Whether files were created since the directory was last flushed.
+    pub fn dir_dirty(&self) -> bool {
+        self.dir_dirty
+    }
+
+    /// Notes that the caller flushed the directory.
+    pub fn dir_synced(&mut self) {
+        self.dir_dirty = false;
+    }
+
+    /// Whether a commit would have nothing to do.
+    pub fn is_clean(&self) -> bool {
+        self.next == self.meta.next_id
+            && self.meta.pre_next_id == self.next
+            && self.meta.reserved_id == self.used
+            && !self.dir_dirty
+    }
+
+    /// Records that the commits from the next on may not be covered by the
+    /// indexes.  It reaches the disk with the next commit's metadata, so no
+    /// commit is durable before it is.
+    pub fn set_indexes_stale(&mut self) {
+        self.meta.indexes_stale = true;
+    }
+
+    /// Records that the indexes cover the commits again, durably.
+    pub fn clear_indexes_stale(&mut self) -> Result<()> {
+        self.meta.indexes_stale = false;
+        self.write_metadata()
     }
 
     /// Whether the log was opened with an interrupted commit, which must be
@@ -713,17 +793,7 @@ impl LocalRecordLog {
     pub fn start_commit(&mut self) -> Result<()> {
         self.check_writer()?;
         self.check_no_pending_commit()?;
-        let first = self
-            .files
-            .partition_point(|f| f.start_id <= self.meta.next_id)
-            - 1;
-        self.sync_files(first)?;
-        if self.dir_dirty
-            && let Some(p) = &self.prefix
-        {
-            mmap::sync_dir(p)?;
-        }
-        self.dir_dirty = false;
+        self.flush_entries()?;
         self.meta.pre_next_id = self.next;
         self.write_metadata()
     }
@@ -748,10 +818,16 @@ impl LocalRecordLog {
         Ok(())
     }
 
-    /// Commits the appended entries in one step.
+    /// Commits the appended entries in one step: they are flushed, then one
+    /// write of the metadata makes them the committed log.
     pub fn commit(&mut self) -> Result<()> {
-        self.start_commit()?;
-        self.complete_commit()
+        self.check_writer()?;
+        self.check_no_pending_commit()?;
+        self.flush_entries()?;
+        self.meta.pre_next_id = self.next;
+        self.meta.next_id = self.next;
+        self.meta.reserved_id = self.used;
+        self.write_metadata()
     }
 
     /// Abandons an interrupted commit found on opening and any entries

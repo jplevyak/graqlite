@@ -377,6 +377,8 @@ pub struct Postings {
     free: Vec<u64>,
     /// The pages released in each epoch, until no pin holds them.
     released: Vec<(u64, Vec<u64>)>,
+    /// Whether the directory needs flushing for the files open.
+    dir_dirty: bool,
 }
 
 impl Postings {
@@ -399,6 +401,8 @@ impl Postings {
             headers: BTreeSet::new(),
             free: Vec::new(),
             released: Vec::new(),
+            // A file found here may be one a crash left unflushed.
+            dir_dirty: prefix.is_some(),
         };
         let existing = prefix.is_some_and(exists);
         p.open_segment(0, existing)?;
@@ -427,7 +431,7 @@ impl Postings {
             if p.shared.load(page, 0) == KIND_HEADER {
                 for w in 0..4 {
                     let durable = p.shared.load(page, H_DURABLE + w);
-                    p.store(page, H_COUNT + w, durable);
+                    p.store_changed(page, H_COUNT + w, durable);
                 }
                 p.headers.insert(page);
             }
@@ -454,6 +458,9 @@ impl Postings {
         };
         let len = file.metadata()?.len();
         let map = Mapping::new(&file, segment_pages(s) * PAGE)?;
+        // All of it: a crash may have left a file found here unflushed.
+        map.mark_dirty(0, len);
+        self.dir_dirty |= !existing && self.prefix.is_some();
         self.shared.segments[s].store(Box::into_raw(Box::new(map)), Ordering::Release);
         while self.files.len() <= s {
             self.files.push(file.try_clone()?);
@@ -485,6 +492,18 @@ impl Postings {
 
     fn store(&self, page: u64, w: usize, v: u64) {
         self.shared.word(page, w).store(v, Ordering::Release);
+        let s = segment_of(page);
+        let map = self.shared.segments[s].load(Ordering::Acquire);
+        // SAFETY: `word` found it mapped, and segments stay mapped.
+        unsafe { (*map).mark_dirty((page - segment_start(s)) * PAGE + 8 * w as u64, 8) };
+    }
+
+    /// Stores a word only if that changes it, so that a sync with nothing
+    /// new to record leaves nothing to flush.
+    fn store_changed(&self, page: u64, w: usize, v: u64) {
+        if self.shared.load(page, w) != v {
+            self.store(page, w, v);
+        }
     }
 
     /// A new page, zeroed, of `kind`: a free one if there is one, or else
@@ -827,8 +846,24 @@ impl Postings {
         self.used
     }
 
-    /// Flushes the postings, then records each changed tree's state as
-    /// durable, and flushes that.
+    /// Whether anything was written since the last [`sync`](Self::sync).
+    pub fn is_dirty(&self) -> bool {
+        self.dir_dirty || self.mapped().any(Mapping::is_dirty)
+    }
+
+    /// Whether the directory needs flushing for these files.
+    pub fn dir_dirty(&self) -> bool {
+        self.dir_dirty
+    }
+
+    /// Notes that the caller flushed the directory.
+    pub fn dir_synced(&mut self) {
+        self.dir_dirty = false;
+    }
+
+    /// Flushes what was written since the last sync, then records each
+    /// changed tree's state as durable, and flushes that.  Postings not
+    /// written do nothing.
     pub fn sync(&mut self) -> io::Result<()> {
         self.flush()?;
         for &header in &self.dirty {
@@ -837,24 +872,29 @@ impl Postings {
                 self.store(header, H_DURABLE + w, live);
             }
         }
-        self.store(0, F_USED, self.used);
+        self.store_changed(0, F_USED, self.used);
         self.flush()?;
         self.dirty.clear();
-        if let Some(p) = &self.prefix {
+        if self.dir_dirty
+            && let Some(p) = &self.prefix
+        {
             mmap::sync_dir(p)?;
         }
+        self.dir_dirty = false;
         Ok(())
     }
 
+    /// The segments mapped.
+    fn mapped(&self) -> impl Iterator<Item = &Mapping> {
+        self.shared.segments.iter().filter_map(|s| {
+            // SAFETY: mapped while `self.shared` lives, if not null.
+            unsafe { s.load(Ordering::Acquire).as_ref() }
+        })
+    }
+
+    /// Flushes the pages written since the last flush.
     fn flush(&self) -> io::Result<()> {
-        for (s, &len) in self.allocated.iter().enumerate() {
-            let map = self.shared.segments[s].load(Ordering::Acquire);
-            if !map.is_null() && len > 0 {
-                // SAFETY: mapped while `self.shared` lives.
-                unsafe { (*map).sync(len)? };
-            }
-        }
-        Ok(())
+        self.mapped().try_for_each(Mapping::sync_dirty)
     }
 
     /// Writes the postings to `sink` as chunks: a header of the magic, the

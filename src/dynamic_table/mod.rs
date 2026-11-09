@@ -316,6 +316,11 @@ struct Metadata {
 }
 
 impl Metadata {
+    /// Marks the whole file, the only granularity worth having for a page.
+    fn mark_dirty(&self) {
+        self.map.mark_dirty(0, METADATA_SIZE);
+    }
+
     fn word(&self, i: usize) -> &AtomicU64 {
         assert!((i as u64 + 1) * 8 <= METADATA_SIZE);
         // SAFETY: aligned and within the metadata file.
@@ -328,6 +333,7 @@ impl Metadata {
 
     fn store(&self, i: usize, v: u64) {
         self.word(i).store(v.to_le(), Ordering::Relaxed);
+        self.mark_dirty();
     }
 
     fn get(&self, level: usize, field: Field) -> u64 {
@@ -390,6 +396,8 @@ pub struct Writer {
     /// Levels retired since the last sync, whose files it deletes once the
     /// metadata saying they were fully expanded is on disk.
     retired: Vec<usize>,
+    /// Whether the directory needs flushing for files this table has open.
+    dir_dirty: bool,
     /// For tests: called before each word of a record is stored, and returning
     /// true abandons the rest of the record, as if the writer crashed.
     fault: Option<Box<dyn FnMut() -> bool + Send + Sync>>,
@@ -453,8 +461,11 @@ impl Writer {
             options,
             inserts: 0,
             retired: Vec::new(),
+            // A file found here may be one a crash left unflushed.
+            dir_dirty: prefix.is_some(),
             fault: None,
         };
+        writer.meta.mark_dirty();
         let current = match current_level(|l, f| writer.meta.get(l, f)) {
             Some(l) => l,
             None => start_level(writer.options.create_size),
@@ -534,16 +545,39 @@ impl Writer {
         Ok(())
     }
 
-    /// Flushes the table, and the directory holding its files, to disk; then
-    /// deletes the files of the levels retired since the last sync.
+    /// Whether anything was written since the last [`sync`](Self::sync).
+    /// Opening a table counts: a crash may have left what it finds unflushed.
+    pub fn is_dirty(&self) -> bool {
+        self.dir_dirty
+            || !self.retired.is_empty()
+            || self.meta.map.is_dirty()
+            || self.live_levels().any(|lvl| lvl.map.is_dirty())
+    }
+
+    /// Whether the directory needs flushing for this table's files.
+    pub fn dir_dirty(&self) -> bool {
+        self.dir_dirty
+    }
+
+    /// Notes that the caller flushed the directory.
+    pub fn dir_synced(&mut self) {
+        self.dir_dirty = false;
+    }
+
+    /// Flushes what was written since the last sync, and the directory if
+    /// it needs it, to disk; then deletes the files of the levels retired
+    /// since the last sync.  A table not written does nothing.
     pub fn sync(&mut self) -> Result<()> {
         for lvl in self.live_levels() {
-            lvl.map.sync(lvl.allocated.load(Ordering::Relaxed))?;
+            lvl.map.sync_dirty()?;
         }
-        self.meta.map.sync(METADATA_SIZE)?;
-        if let Some(p) = &self.prefix {
+        self.meta.map.sync_dirty()?;
+        if self.dir_dirty
+            && let Some(p) = &self.prefix
+        {
             mmap::sync_dir(p)?;
         }
+        self.dir_dirty = false;
         // A crash before this leaves files that the next open deletes.
         for l in std::mem::take(&mut self.retired) {
             self.remove_level_file(l)?;
@@ -776,6 +810,8 @@ impl Writer {
     /// concurrent reader sees a prefix of it.
     fn write(&mut self, lvl: &Level, b: u64, offset: usize, data: &[u8], fault: bool) {
         let words = lvl.bucket(b).expect("bucket is allocated");
+        lvl.map
+            .mark_dirty(b * BUCKET_BYTES as u64 + offset as u64, data.len() as u64);
         let end = offset + data.len();
         let first = offset / 8;
         for (w, word) in words.iter().enumerate().take(end.div_ceil(8)).skip(first) {
@@ -856,6 +892,7 @@ impl Writer {
         if size < initial {
             mmap::allocate(&file, initial)?;
             size = initial;
+            self.dir_dirty |= self.prefix.is_some();
         }
         let reserve = round_up_to_page(
             base_bytes
@@ -869,6 +906,9 @@ impl Writer {
             map: Mapping::new(&file, reserve)?,
             allocated: AtomicU64::new(size),
         });
+        // All of it: a crash may have left a file found here unflushed, and
+        // a snapshot's levels were written to the file, not through this.
+        level.map.mark_dirty(0, size);
         self.meta.set(l, Field::FileSize, size);
         self.shared.levels[l].store(Some(level));
         self.files[l] = Some(file);

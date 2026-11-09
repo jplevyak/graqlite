@@ -259,6 +259,26 @@ pub fn index_log(local: &mut Local, start: u64) -> Result<()> {
     updates.apply(local)
 }
 
+/// The records [`reindex`] holds in memory at a time.
+const REINDEX_BATCH: usize = 1 << 16;
+
+/// Indexes the whole log, in batches so that a long log needs little memory,
+/// into tables that are empty.
+pub fn reindex(local: &mut Local) -> Result<()> {
+    let end = local.log().next_id();
+    let mut id = local.log().start_id();
+    while id < end {
+        let mut updates = Updates::default();
+        for r in local.log().records(id).take(REINDEX_BATCH) {
+            let r = r?;
+            updates.record(&r);
+            id = r.next_id();
+        }
+        updates.apply(local)?;
+    }
+    Ok(())
+}
+
 /// The links with `id` at `linkage`.
 pub fn find_links(local: &Local, linkage: Linkage, id: u64) -> IdSet {
     local

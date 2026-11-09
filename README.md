@@ -109,6 +109,14 @@ with them says whether it is live or dead. Ids increase as entries are
 appended, so queries taking `as_of` see the graph as of that id. Appends are
 visible at once and durable on `commit`; `batch` appends all or nothing.
 
+`Options::synchronous` says what a commit waits for, as SQLite's pragma does.
+`Full`, the default, flushes the log and the indexes. `Normal` flushes only the
+log, and `Off` nothing, for bulk loads and tests: a commit under `Off` survives
+the process being killed but not losing power. After a crash under `Normal` or
+`Off`, opening the database rebuilds its indexes from the whole log, which takes
+time in proportion to the log; a clean close flushes them, so it needs no
+rebuild. The shell's `--synchronous` sets it.
+
 Links may be about other links. `set_link` makes a property single-valued by
 deleting its other live values. `node_by_key` finds or creates the node with a
 unique key. `import` loads entries numbered elsewhere, mapping their ids to
