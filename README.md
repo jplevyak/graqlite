@@ -427,8 +427,10 @@ commands:
 
 `-c TEXT` and `-f FILE` run statements and exit (`-1` runs them in one
 transaction), as does piping a script to standard input. A script runs each
-group of statements when a blank line or a backslash command ends it, and
-stops at the first error, exiting with status 1. `--csv`, `--tsv` and `-x`
+group of statements when a blank line or a backslash command ends it, not
+at the end of each line, so a statement may run over any number of lines
+(an `insert` of thousands of triples, one a line, costs what it would on
+one line); it stops at the first error, exiting with status 1. `--csv`, `--tsv` and `-x`
 set the output format; see `graqlite --help`.
 
 See [Examples](#examples) for scripts to run in it.

@@ -1,6 +1,6 @@
 # The shell re-parses a growing statement on every line
 
-**Status:** open · **Size:** small · **Related:** [016](closed/016-graql-gaps.md) (the grammar `is_incomplete` follows)
+**Status:** closed · **Size:** small · **Related:** [016](016-graql-gaps.md) (the grammar `is_incomplete` follows)
 
 ## Problem
 
@@ -45,11 +45,37 @@ validator share one implementation.
 
 ## Tasks
 
-- [ ] Skip the completeness check for lines that end in a continuation
-      token (`shell.rs` and the `Validator` in `main.rs`)
-- [ ] Lex incrementally: keep the chunk's tokens and lex only the new line
-- [ ] A test in `tests/cli.rs`: a script of one statement over 10 000 lines
-      runs in well under a second
-- [ ] Note in the README that a blank line, not the end of a line, runs a
-      statement in a script (it does, but the cost of the alternative was
-      invisible until now)
+- [x] Skip the completeness check for lines that end in a continuation
+      token (`shell.rs` and the `Validator` in `main.rs`): done otherwise,
+      see below
+- [x] ~~Lex incrementally: keep the chunk's tokens and lex only the new
+      line~~: not needed
+- [x] A test in `tests/cli.rs`: a script of one statement over 5 000 lines
+      (see below)
+- [x] Note in the README that a blank line, not the end of a line, runs a
+      statement in a script
+
+## As implemented
+
+The cause was simpler than the design supposed: `Shell::script` parsed
+the chunk at every line, but used the answer only when the line was blank
+or a backslash command, the only lines that can end the chunk; every
+other line was appended whatever it said. Now it parses only then, so a
+script costs a parse per blank line or command: linear in its length.
+
+- The line editor's validator (`continues` in `main.rs`) already answered
+  a line ending in `.` or `;` without parsing, so typing was mostly fine;
+  it is unchanged.
+- Lexing incrementally isn't needed: parsing happens once per blank line
+  or command in a script, so only a statement with blank lines inside it
+  is parsed more than once.
+- Measured, the issue's 4 000-line `insert` (release): 13.2 s before,
+  0.10 s after, the same as on one line, from a file or piped.
+- `a_long_statement_is_parsed_once` (`tests/cli.rs`) runs one of 5 000
+  lines through the shell in a debug build: 1.8 s, against more than two
+  minutes before (it timed out); it allows 15 s, for slow machines.
+
+## Closed
+
+Closed by the commit parsing a script's chunk only where it can end.
+

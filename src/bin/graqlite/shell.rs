@@ -219,8 +219,11 @@ impl Shell {
         let lines: Vec<&str> = text.lines().collect();
         for (i, &line) in lines.iter().enumerate() {
             let number = i + 1;
-            let in_statement = !chunk.is_empty() && graql::is_incomplete(&chunk);
+            // Only a blank line or a command can end the chunk, so only then
+            // is it parsed to see whether it is in a statement: parsing it at
+            // every line would be quadratic in a long statement.
             let ends = line.trim().is_empty() || line.trim_start().starts_with('\\');
+            let in_statement = ends && !chunk.is_empty() && graql::is_incomplete(&chunk);
             if ends && !in_statement {
                 let step = self.flush(&mut chunk, file, start);
                 if step != Step::Ok {

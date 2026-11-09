@@ -218,6 +218,26 @@ fn piped_scripts() {
     );
 }
 
+/// A statement over many lines is parsed once, not once a line: 5 000
+/// lines take about as long as one line holding them (minutes in a debug
+/// build, when each line parsed the statement so far).
+#[test]
+fn a_long_statement_is_parsed_once() {
+    let mut script = String::from("insert\n");
+    for i in 0..5_000 {
+        script.push_str(&format!("  /p{i} name \"person {i}\" ; age {} .\n", i % 90));
+    }
+    script.push_str("  /last name \"last\"\n\nselect ?n where /last name ?n\n");
+    let start = std::time::Instant::now();
+    let (out, status) = run(&["-q"], &script);
+    let took = start.elapsed();
+    assert_eq!(status, 0, "{out}");
+    assert!(out.starts_with("INSERT 10001\n"), "{out}");
+    assert!(out.contains("\n last\n"), "{out}");
+    // Generous, for a debug build on a busy machine.
+    assert!(took < std::time::Duration::from_secs(15), "{took:?}");
+}
+
 #[test]
 fn dump_and_restore() {
     let dir = TempDir::new("dump");
