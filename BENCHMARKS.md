@@ -65,6 +65,29 @@ on 2026-11-08, with issue 026's change (the best of two runs).
 | prepared query per person/120000 | 1.61 ms |
 | query per person/120000 | 18 ms |
 
+### traversal
+
+Recorded 2026-11-10, at commit `c805e96` with the bench added (issue 040).
+Each `arrays` line is the same work on adjacency arrays built from the
+same edges.
+
+| Benchmark | Median |
+|---|---:|
+| build, graqlite/148704 | 444 ms |
+| build, arrays/148704 | 596 µs |
+| 100 x callers within 3, graqlite/148704 | 2.86 ms |
+| 100 x callers within 3, arrays/148704 | 36 µs |
+| dep closure, graqlite/148704 | 184 ms |
+| dep closure, arrays/148704 | 939 µs |
+| levels over calls, graqlite/148704 | 5.17 ms |
+| levels over calls, arrays/148704 | 34.9 µs |
+
+### traversal edit
+
+| Benchmark | Median |
+|---|---:|
+| replace one definition's calls/148704 | 65.3 µs |
+
 ### writes of 1000
 
 | Benchmark | Median |

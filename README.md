@@ -640,7 +640,8 @@ src/
                       statements and tests
   bin/graqlite/       the command line shell: arguments and line editing
                       (main.rs), commands (shell.rs), tables (render.rs)
-benches/              record log, index, lookups, GraQL and vector search benchmarks
+benches/              record log, index, lookups, GraQL, vector search and traversal
+                      benchmarks
 examples/             GraQL scripts, the output each prints, and pending/
                       for ones of open issues
 docs/                 the comparison with GQL, Cypher, SPARQL and Gremlin
@@ -658,7 +659,7 @@ cargo build
 cargo test          # unit tests, the README's examples, and the shell's scripts
 GRAQLITE_BLESS=1 cargo test --test cli   # rewrite the scripts' .out files
 cargo clippy --all-targets
-cargo bench         # criterion: record log, index, lookups, GraQL, vectors
+cargo bench         # criterion: record log, index, lookups, GraQL, vectors, traversal
 cargo doc --open
 python3 scripts/check-links.py   # the Markdown files' relative links
 ```

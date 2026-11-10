@@ -49,6 +49,10 @@ harness = false
 name = "text"
 harness = false
 
+[[bench]]
+name = "traversal"
+harness = false
+
 [features]
 default = ["cli"]
 # The `graqlite` command line shell.
