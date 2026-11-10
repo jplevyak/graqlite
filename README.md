@@ -223,6 +223,12 @@ batches.
   `q.rule_asserts`), with new nodes for blank nodes, and by aggregates
   (`q.link_aggregate(LinkAggregate::new(LinkFunction::Rank, s, p, key))`),
   whose links the rest of the query can match.
+- **Full-text search:** `?p bio (match "paris louvre")` tests an object for
+  whole words, in any case, and `|` separates alternatives.  Every text value
+  is indexed by its words as it is appended (`graqlite::text`), so where the
+  object is unknown the planner reads the rarest word's list; where it's
+  known it tests the value.  `match(?v, q)` is the same test.  `\reindex`
+  rebuilds the index from the log, and `\info` gives its size.
 - **Nearest neighbours:** `group.nearest(Nearest::new(p, q, k, v, d), s)`
   binds `v` to the `k` values of `p`'s links nearest the vector `q`, and
   `d` to their distances (cosine, l2 or dot), searched exactly; the rest

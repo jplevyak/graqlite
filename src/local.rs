@@ -394,6 +394,42 @@ impl Local {
         Ok(i)
     }
 
+    /// Empties index table `i`: its files are replaced, and readers made
+    /// before go on reading the old one.  Have the indexes
+    /// [marked stale](Self::begin_bulk) first, so that a crash rebuilds them.
+    pub fn reset_table(&mut self, i: usize) -> Result<()> {
+        self.check_writer()?;
+        let options = self.options.index.clone();
+        // Closed before its files go: a table may flush when dropped.
+        self.indexes[i] = LocalTable::open(None, options.clone())?;
+        let prefix = self.prefix.as_ref().map(|p| index_prefix(p, i));
+        if let Some(p) = &prefix {
+            local_table::remove(p)?;
+        }
+        let mut table = LocalTable::open(prefix.as_deref(), options)?;
+        table.set_ordered(self.tables_ordered());
+        self.indexes[i] = table;
+        Ok(())
+    }
+
+    /// The disk space index table `i` takes, in bytes: `None` in memory.
+    pub fn table_bytes(&self, i: usize) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+        let path = index_prefix(self.prefix.as_ref()?, i);
+        let name = path.file_name()?.to_str()?;
+        let dir = match path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        let mut bytes = 0;
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(name) {
+                bytes += entry.metadata().ok()?.blocks() * 512;
+            }
+        }
+        Some(bytes)
+    }
+
     pub fn options(&self) -> &Options {
         &self.options
     }

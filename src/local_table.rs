@@ -12,7 +12,7 @@
 //! key one way.  Sets are not checked for duplicates when inserting, since
 //! that would cost a lookup per insert; duplicates are dropped when reading.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
@@ -206,6 +206,14 @@ impl<const N: usize> From<[u64; N]> for IdSet {
 /// The ids at which a key's set is promoted from its bucket to a tree in the
 /// table's postings (see [`postings`]).
 pub const PROMOTE_AT: usize = 64;
+
+/// The keys waiting for promotion at which they are promoted together.  A
+/// promotion flushes the postings, so that one flush serves many: a text
+/// index has as many keys to promote as words in common use.
+const PROMOTE_BATCH: usize = 1024;
+
+/// The ids at which a key waiting for promotion stops waiting.
+const PROMOTE_BY: usize = 2 * PROMOTE_AT;
 
 /// A table key: an id or a [`Uuid`].
 pub trait Key: Copy {
@@ -506,6 +514,9 @@ pub struct LocalTable {
     postings: Postings,
     /// The header pages of keys found promoted.
     promoted: HashMap<(u64, u64), u64>,
+    /// Keys with [`PROMOTE_AT`] ids, to be promoted together, still in their
+    /// buckets: at most [`PROMOTE_BATCH`], and by the next sync.
+    to_promote: HashSet<(u64, u64)>,
     /// Whether a promotion flushes its tree before a bucket names it; see
     /// [`set_ordered`](Self::set_ordered).
     ordered: bool,
@@ -533,6 +544,7 @@ impl LocalTable {
             writer: Writer::open(prefix, options)?,
             postings: Postings::open(prefix)?,
             promoted: HashMap::new(),
+            to_promote: HashSet::new(),
             ordered: true,
         };
         t.reclaim_unnamed();
@@ -587,30 +599,43 @@ impl LocalTable {
             }
         }
         if count >= PROMOTE_AT {
-            self.promote(k, k2)?;
+            self.to_promote.insert((k, k2));
+            if self.to_promote.len() >= PROMOTE_BATCH || count >= PROMOTE_BY {
+                self.promote()?;
+            }
         }
         Ok(())
     }
 
-    /// Moves the set at a key from its bucket to a tree.
+    /// Moves the sets of the keys waiting from their buckets to trees.
     ///
-    /// The tree is made durable before the bucket's records are replaced by
-    /// one naming it, since the bucket may reach the disk at any time: a
+    /// The trees are made durable before the buckets' records are replaced
+    /// by ones naming them, since a bucket may reach the disk at any time: a
     /// bucket never names a tree that a crash could lose, and a crash before
-    /// the replacement leaves the key's records as they were.
-    fn promote(&mut self, k: u64, k2: u64) -> Result<()> {
-        let Entry::Inline(mut ids) = entry(self.writer.get(k, k2)) else {
-            return Ok(());
-        };
-        ids.sort_unstable();
-        ids.dedup();
-        let h = self.postings.create(&ids)?;
-        self.postings.set_key(h, (k, k2));
-        if self.ordered {
+    /// the replacement leaves the keys' records as they were.
+    fn promote(&mut self) -> Result<()> {
+        let mut trees = Vec::with_capacity(self.to_promote.len());
+        for (k, k2) in std::mem::take(&mut self.to_promote) {
+            let Entry::Inline(mut ids) = entry(self.writer.get(k, k2)) else {
+                continue;
+            };
+            ids.sort_unstable();
+            ids.dedup();
+            // Set or deleted while it waited.
+            if ids.len() < PROMOTE_AT {
+                continue;
+            }
+            let h = self.postings.create(&ids)?;
+            self.postings.set_key(h, (k, k2));
+            trees.push((k, k2, h));
+        }
+        if self.ordered && !trees.is_empty() {
             self.postings.sync()?;
         }
-        self.writer.replace(k, k2, true, &[h])?;
-        self.promoted.insert((k, k2), h);
+        for (k, k2, h) in trees {
+            self.writer.replace(k, k2, true, &[h])?;
+            self.promoted.insert((k, k2), h);
+        }
         Ok(())
     }
 
@@ -642,6 +667,7 @@ impl LocalTable {
     /// since they were promoted: their pages are reused once no reader
     /// made before can be reading them.
     pub fn compact(&mut self, mut keep: impl FnMut(u64) -> bool) -> Result<Compacted> {
+        self.promote()?;
         let mut done = Compacted::default();
         let mut changes = Vec::new();
         // Trees no bucket names: of keys set or deleted since.
@@ -717,6 +743,7 @@ impl LocalTable {
     /// Flushes the table to disk: its postings first, so that a promoted key
     /// never names a tree that is not on disk.
     pub fn sync(&mut self) -> Result<()> {
+        self.promote()?;
         self.postings.sync()?;
         self.writer.sync()
     }
@@ -768,6 +795,7 @@ impl LocalTable {
             writer,
             postings,
             promoted: HashMap::new(),
+            to_promote: HashSet::new(),
             ordered: true,
         };
         t.reclaim_unnamed();
@@ -1183,6 +1211,33 @@ mod tests {
     }
 
     #[test]
+    fn promotions_wait_for_a_sync_or_a_long_set() {
+        let mut t = LocalTable::open(None, Options::default()).unwrap();
+        let ids = |k: u64, n: u64| -> Vec<u64> { (1..=n).map(|i| k * 1000 + i).collect() };
+        t.insert(1u64, ids(1, PROMOTE_AT as u64)).unwrap();
+        assert!(matches!(t.entry(1u64), Entry::Inline(_)));
+        check_key(&t, 1, &ids(1, PROMOTE_AT as u64));
+        t.sync().unwrap();
+        assert!(matches!(t.entry(1u64), Entry::Promoted(_)));
+        check_key(&t, 1, &ids(1, PROMOTE_AT as u64));
+        // A set that grows past the limit doesn't wait.
+        t.insert(2u64, ids(2, PROMOTE_BY as u64)).unwrap();
+        assert!(matches!(t.entry(2u64), Entry::Promoted(_)));
+        // Nor do many keys: the last one in brings them all.
+        for k in 3..3 + PROMOTE_BATCH as u64 {
+            t.insert(k, ids(k, PROMOTE_AT as u64)).unwrap();
+        }
+        assert!(matches!(t.entry(3u64), Entry::Promoted(_)));
+        // A key set while it waited stays in its bucket.
+        t.insert(9_000_000u64, ids(9_000, PROMOTE_AT as u64))
+            .unwrap();
+        t.set(9_000_000u64, 5).unwrap();
+        t.sync().unwrap();
+        assert!(matches!(t.entry(9_000_000u64), Entry::Inline(_)));
+        check_key(&t, 9_000_000, &[5]);
+    }
+
+    #[test]
     fn compaction() {
         let dir = TempDir::new("compaction");
         let prefix = dir.prefix("index");
@@ -1243,6 +1298,7 @@ mod tests {
         let mut twos = range(2001, 2005);
         twos.extend(range(6001, 6100));
         check_key(&t, 2, &twos);
+        t.sync().unwrap();
         assert!(matches!(t.entry(2u64), Entry::Promoted(_)));
         check_key(&t, 3, &[7001]);
         drop(t);

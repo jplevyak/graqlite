@@ -1,6 +1,6 @@
 # A vector index for nearest-neighbour search
 
-**Status:** closed · **Size:** large · **Related:** [031](../031-full-text-search.md) (another index over values), [009](009-expressions-and-literal-types.md) (untyped values), [011](011-adaptive-btree-index-entries.md) (index files that grow)
+**Status:** closed · **Size:** large · **Related:** [031](031-full-text-search.md) (another index over values), [009](009-expressions-and-literal-types.md) (untyped values), [011](011-adaptive-btree-index-entries.md) (index files that grow)
 
 ## Motivation
 

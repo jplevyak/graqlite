@@ -22,7 +22,7 @@ use super::result::{Derivation, ResultGraph, ResultLink, ResultNode};
 use super::rules::{self, Relations, Tuples};
 use super::{
     Assertion, Filter, LinkAggregate, Nearest, Overlay, PathExpr, PathPattern, Pattern, Relation,
-    SortKey, TemplateNode, Term, Var, paths,
+    SortKey, TemplateNode, Term, Var, expr, paths,
 };
 use crate::graph::{EPHEMERAL, Error, Graph, Result};
 use crate::local_table::{IdSet, Ids};
@@ -660,6 +660,98 @@ impl NearestLookup {
         if extend_row(&self.bound, row, fields, new) {
             out.push(new);
         }
+    }
+}
+
+/// Finds the values with the words of a text query, given a row: the text
+/// index's, read as needed, and those only an overlay has, which it can't
+/// know of.
+struct TextLookup {
+    value: Var,
+    query: expr::Expr,
+    bound: Vec<bool>,
+    values: Values,
+    overlay: Option<Shared>,
+    /// The search under way, and the ephemeral values to give after it.
+    stream: Option<crate::text::Matches>,
+    extra: Vec<u64>,
+    new: Vec<u64>,
+}
+
+impl TextLookup {
+    /// Starts the search for `row`.
+    fn start(&mut self, g: &Graph, row: &[u64]) {
+        let cell = match &self.values {
+            Some(values) => self.query.eval(g, &expr::WithValues { ids: row, values }),
+            None => self.query.eval(g, row),
+        };
+        self.extra.clear();
+        let Some(text) = cell.text(g) else {
+            self.stream = None;
+            return;
+        };
+        let query = crate::text::Query::parse(&text);
+        if let Some(o) = &self.overlay {
+            let found: BTreeSet<u64> = o
+                .links()
+                .flat_map(|l| l.spo)
+                .filter(|&id| id & EPHEMERAL != 0 && g.data(id).is_some_and(|d| query.matches(&d)))
+                .collect();
+            self.extra.extend(found);
+        }
+        // Only what the reader or `as of` can see joins, but the log ends
+        // where a reader's snapshot does, and ids past it aren't entries.
+        let last = g.next_id().saturating_sub(1);
+        self.stream = Some(query.search(&g.text_table(), last));
+    }
+
+    /// Appends more matches of `row`, until `limit` says `out` is full;
+    /// returns whether they are all appended.
+    fn fill(&mut self, g: &Graph, row: &[u64], out: &mut Batch, limit: bool) -> bool {
+        let table = g.text_table();
+        loop {
+            if limit && out.is_full() {
+                return false;
+            }
+            let id = match self.stream.as_mut().and_then(|s| s.next(&table)) {
+                Some(id) => id,
+                None => {
+                    self.stream = None;
+                    match self.extra.pop() {
+                        Some(id) => id,
+                        None => return true,
+                    }
+                }
+            };
+            // Left by a rollback or a crash, an id names no value.
+            if g.data(id).is_some()
+                && extend_row(
+                    &self.bound,
+                    row,
+                    [(Term::Var(self.value), id)],
+                    &mut self.new,
+                )
+            {
+                out.push(&self.new);
+            }
+        }
+    }
+}
+
+impl Lookup for TextLookup {
+    fn matches(&mut self, g: &Graph, row: &[u64], out: &mut Batch) -> Result<()> {
+        self.start(g, row);
+        self.fill(g, row, out, false);
+        Ok(())
+    }
+
+    fn begin(&mut self, g: &Graph, row: &[u64], out: &mut Batch) -> Result<bool> {
+        self.start(g, row);
+        Ok(self.fill(g, row, out, true))
+    }
+
+    fn resume(&mut self, g: &Graph, row: &[u64], out: &mut Batch) -> Result<bool> {
+        Ok(self.fill(g, row, out, true))
     }
 }
 
@@ -2022,6 +2114,31 @@ impl Context {
                         streaming: false,
                     });
                     nearest.vars().for_each(|v| bound[v.0] = true);
+                    joined
+                }
+                Step::Text { value, query, .. } => {
+                    let joined = Box::new(BindJoin {
+                        input: op,
+                        matcher: self.counted(
+                            step,
+                            Box::new(TextLookup {
+                                value: *value,
+                                query: query.clone(),
+                                bound: bound.to_vec(),
+                                values: self.values.clone(),
+                                overlay: self.overlay.clone(),
+                                stream: None,
+                                extra: Vec::new(),
+                                new: Vec::new(),
+                            }),
+                        ),
+                        in_batch: Batch::new(width),
+                        in_pos: 0,
+                        pending: Batch::new(width),
+                        pending_pos: 0,
+                        streaming: false,
+                    });
+                    bound[value.0] = true;
                     joined
                 }
                 Step::Filter(filters) => Box::new(FilterOp {

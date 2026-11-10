@@ -4026,3 +4026,325 @@ fn a_load_presizes_an_empty_graph_and_answers_the_same() {
     assert_eq!(f.select("select ?p where ?p n 3").len(), 429);
     assert_eq!(f.select("select ?n where /p10 n ?n"), strs(&[&["3"]]));
 }
+
+/// The sorted data of the single column of `query`'s rows.
+fn column(g: &mut Graph, query: &str) -> Vec<String> {
+    let out = one(g, query);
+    let mut found: Vec<String> = data(g, rows(&out))
+        .into_iter()
+        .map(|mut r| r.remove(0))
+        .collect();
+    found.sort();
+    found
+}
+
+/// People with biographies, and values no link names.
+fn people() -> Graph {
+    let mut g = graph();
+    execute(
+        &mut g,
+        r#"insert /ann bio "Born in Paris, she ran the Louvre" ; name "Ann" .
+                  /bob bio "Bob paints in PARIS" ; name "Bob" .
+                  /cat bio "Curator at the Musée d'Orsay" ; name "Cat" .
+                  /dan bio "Lives in Москва" ; name "Dan"
+                  "#,
+    )
+    .unwrap();
+    g.commit().unwrap();
+    g
+}
+
+#[test]
+fn match_finds_values_with_every_word_or_any() {
+    let mut g = people();
+    let names = |g: &mut Graph, q: &str| {
+        column(
+            g,
+            &format!("select ?n where ?p bio (match {q:?}) ; name ?n"),
+        )
+    };
+    assert_eq!(names(&mut g, "paris"), ["Ann", "Bob"]);
+    assert_eq!(names(&mut g, "Paris LOUVRE"), ["Ann"]);
+    assert_eq!(names(&mut g, "louvre | orsay"), ["Ann", "Cat"]);
+    assert_eq!(names(&mut g, "louvre paris | musée"), ["Ann", "Cat"]);
+    assert_eq!(names(&mut g, "МОСКВА"), ["Dan"]);
+    assert_eq!(names(&mut g, "pari"), Vec::<String>::new());
+    assert_eq!(names(&mut g, "paris nowhere"), Vec::<String>::new());
+    assert_eq!(names(&mut g, "..."), Vec::<String>::new());
+    assert_eq!(names(&mut g, ""), Vec::<String>::new());
+    // Any predicate, a parameter, and the function's form.
+    assert_eq!(
+        column(
+            &mut g,
+            r#"select ?p where /bob ?p (match "bob") . ?x ?p "Bob""#
+        ),
+        ["name"]
+    );
+    assert_eq!(
+        column(
+            &mut g,
+            r#"select ?n where ?p bio ?b ; name ?n . match(?b, "orsay")"#
+        ),
+        ["Cat"]
+    );
+    let mut s = Session::new();
+    let params: Params = [("q".to_string(), Param::Value("louvre".to_string()))].into();
+    let out = s
+        .execute_with(
+            &mut g,
+            "select ?n where ?p bio (match $q) ; name ?n",
+            &params,
+        )
+        .unwrap();
+    assert_eq!(data(&g, rows(&out[0])), [["Ann"]]);
+}
+
+#[test]
+fn match_is_the_same_by_the_index_and_by_the_test() {
+    // Words from a small set, so that lists are long and overlap.
+    let mut g = graph();
+    let words = ["alpha", "beta", "gamma", "delta", "ÉPSILON"];
+    let mut x = 1u64;
+    let mut texts = Vec::new();
+    for i in 0..3000 {
+        let mut text = format!("doc{i}");
+        for w in words {
+            x = x.wrapping_mul(0x2545_f491_4f6c_dd1d).wrapping_add(7);
+            if (x >> 33).is_multiple_of(3) {
+                text.push(' ');
+                text.push_str(w);
+            }
+        }
+        let s = g.node().unwrap();
+        let p = g.value(b"text").unwrap();
+        let o = g.value(text.as_bytes()).unwrap();
+        g.link(s, p, o).unwrap();
+        texts.push(text);
+    }
+    g.commit().unwrap();
+    for query in [
+        "alpha",
+        "alpha beta",
+        "alpha beta gamma",
+        "epsilon",
+        "épsilon alpha",
+        "alpha delta | gamma beta",
+        "doc17",
+        "doc17 alpha | doc18",
+        "missing",
+    ] {
+        let q = crate::text::Query::parse(query);
+        let mut expected: Vec<String> = texts
+            .iter()
+            .filter(|t| q.matches(t.as_bytes()))
+            .cloned()
+            .collect();
+        expected.sort();
+        let found = column(
+            &mut g,
+            &format!("select ?v where ?s text (match {query:?}) . ?s text ?v"),
+        );
+        assert_eq!(found, expected, "{query}");
+        // The same with the value bound first, so that the filter tests it.
+        let filtered = column(
+            &mut g,
+            &format!("select ?v where ?s text ?v . match(concat(?v, \"\"), {query:?})"),
+        );
+        assert_eq!(filtered, expected, "{query}");
+    }
+}
+
+#[test]
+fn match_tests_values_not_keys_or_vectors() {
+    let mut g = graph();
+    execute(&mut g, r#"insert /paris label "city" . /x ref /paris"#).unwrap();
+    let e = g.value(&crate::vector::encode(&[1.0, 2.0])).unwrap();
+    let (s, p) = (g.node().unwrap(), g.value(b"e").unwrap());
+    g.link(s, p, e).unwrap();
+    g.commit().unwrap();
+    assert!(
+        rows(&one(
+            &mut g,
+            r#"select ?o where /x ref ?o . match(?o, "paris")"#
+        ))
+        .is_empty()
+    );
+    assert!(rows(&one(&mut g, r#"select ?o where ?s e ?o . match(?o, "1")"#)).is_empty());
+    assert!(rows(&one(&mut g, r#"select ?o where ?s ?p ( :?o match "1" )"#)).is_empty());
+}
+
+#[test]
+fn match_joins_with_negation_optional_and_as_of() {
+    let mut g = people();
+    assert_eq!(
+        column(
+            &mut g,
+            r#"select ?n where ?p name ?n and not ( ?p bio (match "paris") )"#
+        ),
+        ["Cat", "Dan"]
+    );
+    assert_eq!(
+        column(
+            &mut g,
+            r#"select ?n where ?p name ?n and optional ( ?p bio (match "louvre") ) and ?p bio (match "paris")"#
+        ),
+        ["Ann", "Bob"]
+    );
+    let before = g.next_id();
+    execute(&mut g, r#"insert /eve bio "Moved to Paris" ; name "Eve""#).unwrap();
+    g.commit().unwrap();
+    let q = r#"select ?n where ?p bio (match "paris") ; name ?n"#;
+    assert_eq!(column(&mut g, q), ["Ann", "Bob", "Eve"]);
+    let old = format!(r#"select ?n as of {before} where ?p bio (match "paris") ; name ?n"#);
+    assert_eq!(column(&mut g, &old), ["Ann", "Bob"]);
+    let since = format!(r#"select ?n since {before} where ?p bio (match "paris") ; name ?n"#);
+    assert_eq!(column(&mut g, &since), ["Eve"]);
+    // A deleted link's value is still indexed, but no live link joins it.
+    execute(&mut g, r#"delete /bob bio "Bob paints in PARIS""#).unwrap();
+    g.commit().unwrap();
+    assert_eq!(column(&mut g, q), ["Ann", "Eve"]);
+}
+
+#[test]
+fn match_leaves_out_what_a_rollback_or_a_reader_cannot_see() {
+    let mut g = people();
+    let q = r#"select ?v where ?p bio (match "paris") . ?p bio ?v"#;
+    let reader = g.reader();
+    execute(&mut g, r#"insert /eve bio "Moved to Paris""#).unwrap();
+    // Seen by the writer before its commit, and not by the reader.
+    assert_eq!(column(&mut g, q).len(), 3);
+    let mut reader = reader;
+    assert_eq!(column(&mut reader, q).len(), 2);
+    g.rollback().unwrap();
+    assert_eq!(column(&mut g, q).len(), 2);
+    assert!(rows(&one(&mut g, r#"select ?p where ?p bio (match "moved")"#)).is_empty());
+}
+
+#[test]
+fn match_sees_values_only_an_overlay_has() {
+    let mut g = people();
+    let mut s = Session::new();
+    s.execute(&mut g, r#"assume /zed bio "Visiting Paris""#)
+        .unwrap();
+    let out = s
+        .execute(
+            &mut g,
+            r#"select ?v where ?p bio (match "visiting") . ?p bio ?v"#,
+        )
+        .unwrap();
+    assert_eq!(data(&g, rows(&out[0])), [["Visiting Paris"]]);
+}
+
+#[test]
+fn match_reads_long_lists() {
+    // Every value has "common"; the rare word is in a few, far apart.
+    let mut g = graph();
+    let (s, p) = (g.node().unwrap(), g.value(b"t").unwrap());
+    for i in 0..30_000 {
+        let rare = if i % 7_000 == 3 { " rare" } else { "" };
+        let also = if i % 2 == 0 { " even" } else { "" };
+        let o = g
+            .value(format!("common{also}{rare} n{i}").as_bytes())
+            .unwrap();
+        g.link(s, p, o).unwrap();
+    }
+    g.commit().unwrap();
+    let found = |g: &mut Graph, q: &str| {
+        let text = format!("select ?v where ?s t ( :?v match {q:?} )");
+        rows(&one(g, &text)).len()
+    };
+    assert_eq!(found(&mut g, "common rare"), 5);
+    // The rare ones are all odd.
+    assert_eq!(found(&mut g, "even rare"), 0);
+    assert_eq!(found(&mut g, "rare | even"), 15_005);
+    assert_eq!(found(&mut g, "common"), 30_000);
+}
+
+#[test]
+fn an_older_database_is_indexed_when_opened() {
+    let f = Files::new("text-upgrade");
+    let prefix = f.dir.join("db.");
+    let options = Options::default;
+    let mut g = Graph::open(Some(&prefix), options()).unwrap();
+    execute(&mut g, r#"insert /a bio "old words here" . /b bio "other""#).unwrap();
+    g.commit().unwrap();
+    drop(g);
+    // A database from before the index: it has no such table.
+    let text = crate::tuple_index::BuiltinIndex::Text.table();
+    let old = f.dir.join(format!("db.index{text}."));
+    assert!(crate::local_table::exists(&old));
+    crate::local_table::remove(&old).unwrap();
+    let mut g = Graph::open(Some(&prefix), options()).unwrap();
+    assert!(!g.local().indexes_stale());
+    let q = r#"select ?v where ?s bio (match "words") . ?s bio ?v"#;
+    assert_eq!(column(&mut g, q), ["old words here"]);
+    drop(g);
+    // And not again.
+    let mut g = Graph::open(Some(&prefix), options()).unwrap();
+    assert_eq!(column(&mut g, q), ["old words here"]);
+}
+
+#[test]
+fn the_text_index_is_rebuilt_and_comes_back_after_a_crash() {
+    use crate::graph::Synchronous;
+    let f = Files::new("text-rebuild");
+    let prefix = f.dir.join("db.");
+    let mut g = Graph::open(Some(&prefix), Options::default()).unwrap();
+    execute(&mut g, r#"insert /a bio "kept words""#).unwrap();
+    g.commit().unwrap();
+    let q = r#"select ?v where ?s bio (match "kept") . ?s bio ?v"#;
+    let reader = g.reader();
+    g.reindex_text().unwrap();
+    assert_eq!(column(&mut g, q), ["kept words"]);
+    // A reader made before goes on reading the old table.
+    let mut reader = reader;
+    assert_eq!(column(&mut reader, q), ["kept words"]);
+    drop(reader);
+    // Not with entries uncommitted.
+    execute(&mut g, r#"insert /b bio "fresh""#).unwrap();
+    assert!(g.reindex_text().is_err());
+    g.commit().unwrap();
+    assert!(g.reindex_text().is_ok());
+    assert_eq!(
+        column(
+            &mut g,
+            r#"select ?v where ?s bio (match "fresh") . ?s bio ?v"#
+        ),
+        ["fresh"]
+    );
+    drop(g);
+
+    let options = || Options {
+        synchronous: Synchronous::Normal,
+        ..Options::default()
+    };
+    let mut g = Graph::open(Some(&prefix), options()).unwrap();
+    execute(&mut g, r#"insert /c bio "after normal""#).unwrap();
+    g.commit().unwrap();
+    g.crash_for_test();
+    drop(g);
+    let mut g = Graph::open(Some(&prefix), options()).unwrap();
+    assert_eq!(
+        column(
+            &mut g,
+            r#"select ?v where ?s bio (match "normal") . ?s bio ?v"#
+        ),
+        ["after normal"]
+    );
+    assert_eq!(column(&mut g, q), ["kept words"]);
+}
+
+#[test]
+fn a_snapshot_keeps_the_text_index() {
+    let mut g = people();
+    let mut buf = Vec::new();
+    g.snapshot(&mut buf).unwrap();
+    let mut r = Graph::restore(None, Options::default(), &mut buf.as_slice()).unwrap();
+    assert_eq!(
+        column(
+            &mut r,
+            r#"select ?n where ?p bio (match "orsay") ; name ?n"#
+        ),
+        ["Cat"]
+    );
+}

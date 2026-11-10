@@ -30,6 +30,7 @@ read them without running anything.
 | [22-the-rest-of-the-tour](22-the-rest-of-the-tour.graql) | `- pattern` and `+ pattern` defaults, nested limits, `FUNCTION` (conditions, `+integer`), rule parameters without `?`, `\format tree`, template rules in `INSERT`, `TEST` |
 | [24-loading-files](24-loading-files.graql) | `insert … from csv`, columns by name and position, a clause saying what a column holds, `delete … from csv`; `\copy` |
 | [23-vector-search](23-vector-search.graql) | vectors as values (`vector`, `str`, `distance`), stored by a `let`, `index vector on`, `\di`, `nearest(P q k ?v ?d)` filtered by links, by a parameter and by a bound vector, `\explain` |
+| [25-full-text-search](25-full-text-search.graql) | `(match "words")`, alternatives with `\|`, `match(?v, q)`, joined with the graph, `\explain` of the index, `\reindex` |
 
 Scripts for features open issues will add go in [pending/](pending/README.md);
 the golden tests don't run them.

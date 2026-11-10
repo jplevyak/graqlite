@@ -41,6 +41,7 @@ use std::ops;
 use super::aggregate::{Cell, Number, compare_cells};
 use super::{Cmp, Var, compare_data};
 use crate::graph::Graph;
+use crate::text::Query;
 use crate::times::{format_time, parse_time};
 use crate::vector::Metric;
 
@@ -448,6 +449,9 @@ pub enum Func {
     Ends,
     /// Whether text matches a regular expression, anywhere in it.
     Matches,
+    /// Whether a value has the words of a [text query](crate::text::Query),
+    /// which the planner can answer from the text index.
+    TextMatch,
     /// Texts joined.
     Concat,
     /// Whether a variable is bound.
@@ -485,6 +489,7 @@ const FUNCS: &[(Func, &str, usize, usize)] = &[
     // GraQL's PREFIX, as in `(PREFIX("Bil"))`.
     (Func::Starts, "prefix", 2, 2),
     (Func::Matches, "matches", 2, 2),
+    (Func::TextMatch, "match", 2, 2),
     (Func::Concat, "concat", 1, usize::MAX),
     (Func::Bound, "bound", 1, 1),
     (Func::Id, "id", 1, 1),
@@ -517,7 +522,12 @@ impl Func {
     pub fn is_test(self) -> bool {
         matches!(
             self,
-            Func::Contains | Func::Starts | Func::Ends | Func::Matches | Func::Bound
+            Func::Contains
+                | Func::Starts
+                | Func::Ends
+                | Func::Matches
+                | Func::TextMatch
+                | Func::Bound
         )
     }
 }
@@ -606,6 +616,19 @@ fn call(g: &Graph, f: Func, args: &[Cell]) -> Cell {
         Func::Starts => test(|a, b| a.starts_with(b)),
         Func::Ends => test(|a, b| a.ends_with(b)),
         Func::Matches => test(matches),
+        // Of a value's data, as the index has it: not a node's key, or a
+        // vector written as text.
+        Func::TextMatch => match (&args[0], text(1)) {
+            (Cell::Unbound, _) | (_, None) => Cell::Unbound,
+            (Cell::Id(id), Some(q)) => {
+                Cell::Bool(g.data(*id).is_some_and(|d| text_matches(&d, &q)))
+            }
+            (Cell::Vector(_), Some(_)) => Cell::Bool(false),
+            (_, Some(q)) => match text(0) {
+                Some(t) => Cell::Bool(text_matches(t.as_bytes(), &q)),
+                None => Cell::Unbound,
+            },
+        },
         Func::Concat => {
             let mut out = String::new();
             for i in 0..args.len() {
@@ -673,6 +696,22 @@ fn call(g: &Graph, f: Func, args: &[Cell]) -> Cell {
             }
         }
     }
+}
+
+/// Whether `data` has the words of the query `text`.  The last query parsed
+/// is kept: a test is usually of one query, for many rows.
+fn text_matches(data: &[u8], text: &str) -> bool {
+    use std::cell::RefCell;
+    thread_local! {
+        static LAST: RefCell<Option<(String, Query)>> = const { RefCell::new(None) };
+    }
+    LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        if last.as_ref().is_none_or(|(t, _)| t != text) {
+            *last = Some((text.to_string(), Query::parse(text)));
+        }
+        last.as_ref().expect("parsed").1.matches(data)
+    })
 }
 
 /// Whether `text` matches the regular expression `pattern` anywhere: false

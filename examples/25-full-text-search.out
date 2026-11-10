@@ -1,0 +1,57 @@
+INSERT 12
+ n
+-------------
+ "Ann Duval"
+ "Bob Marsh"
+(2 rows)
+ n
+-------------
+ "Ann Duval"
+(1 row)
+ n
+---
+(0 rows)
+ n
+--------------
+ "Bob Marsh"
+ "Cat Okafor"
+(2 rows)
+ n
+--------------
+ "Dan Ivanov"
+(1 row)
+ n
+-------------
+ "Bob Marsh"
+(1 row)
+ p    | v
+------+----------------------------------------
+ bio  | "Paints the bridges of PARIS at night"
+ name | "Ann Duval"
+(2 rows)
+ n
+--------------
+ "Ann Duval"
+ "Dan Ivanov"
+(2 rows)
+INSERT 40
+INSERT 1
+scan match(?[1], "river amber"), rows ~1
+  via the text index: amber 1, river 22
+bind join (?n note ?[1]) via predicate+object index, rows ~1
+ n
+----------
+ /special
+(1 row)
+scan (/ann bio ?b) via subject+predicate index, rows ~1
+filter match(?b, "paris")
+DELETE 1
+ n
+-------------
+ "Bob Marsh"
+(1 row)
+rebuilt the text index
+ n
+--------------
+ "Cat Okafor"
+(1 row)

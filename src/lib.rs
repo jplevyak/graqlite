@@ -31,6 +31,8 @@ pub mod record_log;
 #[cfg(all(unix, target_pointer_width = "64"))]
 pub mod stats;
 #[cfg(all(unix, target_pointer_width = "64"))]
+pub mod text;
+#[cfg(all(unix, target_pointer_width = "64"))]
 pub mod times;
 #[cfg(all(unix, target_pointer_width = "64"))]
 pub mod tuple_index;

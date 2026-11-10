@@ -13,6 +13,7 @@ use crate::local::Local;
 use crate::local_record_log;
 use crate::local_table::{self, IdSet, Ids};
 use crate::record::{Linkage, Record, Uuid};
+use crate::text;
 
 /// The built-in indexes, numbered as tables of a [`Local`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,10 +36,12 @@ pub enum BuiltinIndex {
     SubjectPredicate,
     /// Links by [`intersection_key`] of predicate and object.
     PredicateObject,
+    /// The values containing each term, by its [key](text::key).
+    Text,
 }
 
 /// The number of built-in indexes.
-pub const NUM_BUILTIN_INDEXES: usize = 9;
+pub const NUM_BUILTIN_INDEXES: usize = 10;
 
 impl BuiltinIndex {
     /// The table number.
@@ -59,7 +62,7 @@ impl BuiltinIndex {
     }
 }
 
-const _: () = assert!(BuiltinIndex::PredicateObject as usize + 1 == NUM_BUILTIN_INDEXES);
+const _: () = assert!(BuiltinIndex::Text as usize + 1 == NUM_BUILTIN_INDEXES);
 
 /// The indexes of links by a pair of linkages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -181,17 +184,30 @@ struct Updates {
     values: Vec<(Uuid, u64)>,
     /// Ids to add to sets, by index and key.
     sets: BTreeMap<(usize, Uuid), Vec<u64>>,
+    /// How many ids are in `sets`.
+    pending: usize,
 }
 
 impl Updates {
     fn add(&mut self, index: BuiltinIndex, key: Uuid, id: u64) {
         self.sets.entry((index.table(), key)).or_default().push(id);
+        self.pending += 1;
+    }
+
+    /// Adds the terms of the value `r`, if it is one.
+    fn text(&mut self, r: &Record<'_>) {
+        if r.is_value() {
+            for term in text::terms(r.data().expect("a value")) {
+                self.add(BuiltinIndex::Text, text::key(&term), r.id());
+            }
+        }
     }
 
     fn record(&mut self, r: &Record<'_>) {
         if r.is_value() {
             let data = r.data().expect("a value");
             self.values.push((Uuid::of(data), r.id()));
+            self.text(r);
         }
         let Some(link) = r.as_link() else {
             return;
@@ -261,6 +277,49 @@ pub fn index_log(local: &mut Local, start: u64) -> Result<()> {
 
 /// The records [`reindex`] holds in memory at a time.
 const REINDEX_BATCH: usize = 1 << 16;
+/// The ids [`reindex`] holds in memory at a time: long texts have many.
+const REINDEX_IDS: usize = 1 << 22;
+
+/// The key in the text index saying that the index covers the log, which a
+/// term, having no zero byte, can't have.  A database made before the index
+/// has none, nor does one that has yet to be indexed.
+fn text_covered_key() -> Uuid {
+    Uuid::of(b"\0the text index covers the log")
+}
+
+/// Whether the text index covers the log: if not, it needs [`index_text`].
+pub fn text_covered(local: &Local) -> bool {
+    local
+        .table(BuiltinIndex::Text.table())
+        .find_one(text_covered_key())
+        .is_some()
+}
+
+/// Records that the text index covers the log.
+pub fn mark_text_covered(local: &mut Local) -> Result<()> {
+    Ok(local
+        .table_mut(BuiltinIndex::Text.table())
+        .set(text_covered_key(), 1)?)
+}
+
+/// Adds the terms of the whole log's values to a text index that is empty.
+pub fn index_text(local: &mut Local) -> Result<()> {
+    let end = local.log().next_id();
+    let mut id = local.log().start_id();
+    while id < end {
+        let mut updates = Updates::default();
+        for r in local.log().records(id).take(REINDEX_BATCH) {
+            let r = r?;
+            updates.text(&r);
+            id = r.next_id();
+            if updates.pending >= REINDEX_IDS {
+                break;
+            }
+        }
+        updates.apply(local)?;
+    }
+    Ok(())
+}
 
 /// Indexes the whole log, in batches so that a long log needs little memory,
 /// into tables that are empty.
@@ -273,10 +332,13 @@ pub fn reindex(local: &mut Local) -> Result<()> {
             let r = r?;
             updates.record(&r);
             id = r.next_id();
+            if updates.pending >= REINDEX_IDS {
+                break;
+            }
         }
         updates.apply(local)?;
     }
-    Ok(())
+    mark_text_covered(local)
 }
 
 /// The links with `id` at `linkage`.

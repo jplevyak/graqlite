@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use super::aggregate::Cell;
 use super::exec::Rows;
+use super::expr::{Expr, Func};
 use super::profile::{Counts, Profile, Profiler, ReductionProfile, StepProfile, step_key};
 use super::reduce::{self, Link, Reduced, Reduction};
 use super::result::ResultGraph;
@@ -37,6 +38,8 @@ const FILTER_COST: f64 = 0.2;
 const GROUP_COST: f64 = 1.0;
 /// Measuring the distance from a vector to one searched.
 const DISTANCE_COST: f64 = 1.0;
+/// The values taken to match a text query not known when planning.
+const UNKNOWN_TEXT_MATCHES: u64 = 100;
 /// The cost of a lookup in reduced links, apart from the links it finds.
 const REDUCED_LOOKUP_COST: f64 = 0.5;
 /// The cost of a reduced link found by a lookup or a scan.
@@ -171,6 +174,18 @@ pub(crate) enum Step {
         nearest: Nearest,
         scan: GroupPlan,
         indexed: Option<usize>,
+        rows: f64,
+    },
+    /// Joins the values the text index has for a query: for each row, those
+    /// with the words of `query`, read as needed, binding `value`.  It does
+    /// the work of the group's filter number `at`, which was the test.
+    Text {
+        filter: Filter,
+        at: usize,
+        value: Var,
+        query: Expr,
+        /// The values with each term, if the query was known when planned.
+        terms: Vec<(String, u64)>,
         rows: f64,
     },
     Filter(Vec<Filter>),
@@ -536,6 +551,7 @@ impl Step {
             | Step::Path { rows, .. }
             | Step::Call { rows, .. }
             | Step::Nearest { rows, .. }
+            | Step::Text { rows, .. }
             | Step::Not { rows, .. }
             | Step::Optional { rows, .. }
             | Step::NotChange { rows, .. } => (Some(*rows), None),
@@ -651,6 +667,27 @@ fn explain_group(
                     }
                 }
                 explain_group(q, scan, depth + 2, true, name, out, sink.as_deref_mut());
+                first = false;
+            }
+            Step::Text {
+                filter,
+                terms,
+                rows,
+                ..
+            } => {
+                let how = if first { "scan" } else { "bind join" };
+                let _ = writeln!(
+                    out,
+                    "{pad}{how} {}, rows ~{rows:.0}",
+                    q.filter_name(filter, name)
+                );
+                if terms.is_empty() {
+                    let _ = writeln!(out, "{pad}  via the text index, for the words when run");
+                } else {
+                    let counts: Vec<String> =
+                        terms.iter().map(|(t, n)| format!("{t} {n}")).collect();
+                    let _ = writeln!(out, "{pad}  via the text index: {}", counts.join(", "));
+                }
                 first = false;
             }
             Step::Filter(filters) => {
@@ -1026,7 +1063,22 @@ enum Item<'q> {
     /// A call, its tuples, and whether they were given.
     Call(&'q Call, &'q CallTuples, bool),
     Nearest(&'q Nearest),
+    /// A test of a value's words, filter number `.0` of the group, on the
+    /// variable `.1` for the query `.2`.  Its filter does the work unless
+    /// the text index is used to bind the variable.
+    Text(usize, Var, &'q Expr),
     Union(&'q [Group]),
+}
+
+/// The variable and query of a test that the text index can answer.
+fn text_test(filter: &Filter) -> Option<(Var, &Expr)> {
+    let Filter::Holds(Expr::Call(Func::TextMatch, args)) = filter else {
+        return None;
+    };
+    match args.as_slice() {
+        [Expr::Var(v), q @ (Expr::Const(_) | Expr::Var(_))] => Some((*v, q)),
+        _ => None,
+    }
 }
 
 /// The tuples of a call, and the distinct values of each column.
@@ -1137,6 +1189,14 @@ impl Planner<'_, '_> {
                     .map(|(c, (t, given))| Item::Call(c, t, *given)),
             )
             .chain(group.nearest.iter().map(Item::Nearest))
+            // Only of a variable a pattern of the group binds: then every
+            // row's value is a link's, which the index has.  Any other is
+            // left to its filter.
+            .chain(group.filters.iter().enumerate().filter_map(|(i, f)| {
+                let (v, q) = text_test(f)?;
+                let linked = group.patterns.iter().any(|p| p.vars().any(|x| x == v));
+                linked.then_some(Item::Text(i, v, q))
+            }))
             .chain(group.unions.iter().map(|u| Item::Union(u)))
             .collect();
         let candidates = reduction.as_ref().and(self.candidates.clone());
@@ -1558,6 +1618,45 @@ impl Planner<'_, '_> {
                     ));
                 }
             }
+            Item::Text(at, value, query) => {
+                if partial.bound[value.0] {
+                    // Its filter tests the value, as it does any other.
+                    return vec![partial.clone()];
+                }
+                let ready = match query {
+                    Expr::Var(v) => partial.bound[v.0],
+                    _ => true,
+                };
+                if ready {
+                    after[value.0] = true;
+                    let g = self.est.g;
+                    let known = match query {
+                        Expr::Const(c) => c.text(g).map(|t| crate::text::Query::parse(t.as_str())),
+                        _ => None,
+                    };
+                    let (terms, found) = match &known {
+                        Some(q) => q.counts(&g.text_table()),
+                        None => (Vec::new(), UNKNOWN_TEXT_MATCHES),
+                    };
+                    let lists = known.as_ref().map_or(1, |q| {
+                        q.alternatives().iter().map(Vec::len).max().unwrap_or(1)
+                    });
+                    let found = found as f64;
+                    let rows = partial.rows * found;
+                    ways.push((
+                        Step::Text {
+                            filter: group.filters[at].clone(),
+                            at,
+                            value,
+                            query: query.clone(),
+                            terms,
+                            rows,
+                        },
+                        partial.rows * (LOOKUP_COST + found * lists as f64 * ENTRY_COST),
+                        rows,
+                    ));
+                }
+            }
             Item::Union(branches) => {
                 // The branches' variables: the same in each, but for hidden
                 // link variables.
@@ -1629,6 +1728,9 @@ impl Planner<'_, '_> {
             .filter(|w| !forced || join(&w.0) == force)
             .filter_map(|(step, cost, rows)| {
                 let mut p = partial.clone();
+                if let Step::Text { at, .. } = step {
+                    p.filters_done[at] = true;
+                }
                 p.steps.push(step);
                 p.cost += cost;
                 p.rows = rows;

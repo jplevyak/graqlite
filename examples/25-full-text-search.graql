@@ -1,0 +1,48 @@
+-- Full-text search: every value is indexed by its words, and `match` finds
+-- the values with them.  A search is joined with the graph like any test.
+
+insert /ann name "Ann Duval" ; city /paris ; bio "Curator at the Louvre, born in Paris" .
+       /bob name "Bob Marsh" ; city /paris ; bio "Paints the bridges of PARIS at night" .
+       /cat name "Cat Okafor" ; city /lyon ; bio "Restores paintings for the Musée d'Orsay" .
+       /dan name "Dan Ivanov" ; city /moscow ; bio "Лектор: lectures on art in Москва"
+
+-- The object must have every word, in any case, whole.
+select ?n by ?n where ?p bio (match "paris") ; name ?n
+select ?n by ?n where ?p bio (match "louvre paris") ; name ?n
+select ?n by ?n where ?p bio (match "pari") ; name ?n
+
+-- `|` separates alternatives, each a list of words.
+select ?n by ?n where ?p bio (match "orsay | bridges night") ; name ?n
+
+-- Words are Unicode, and a query can be a parameter.
+\set q "москва"
+select ?n by ?n where ?p bio (match $q) ; name ?n
+
+-- It is joined with the rest of the pattern: people in Paris whose
+-- biography doesn't mention the Louvre.
+select ?n by ?n where ?p city /paris ; name ?n and not ( ?p bio (match "louvre") )
+
+-- Any predicate: which links have values with the word?
+select ?p, ?v by ?p, ?v where ?s ?p ( :?v match "duval | paints" )
+
+-- `match(?v, "words")` is the same test, for anywhere a test goes.
+select ?n by ?n where ?p name ?n ; bio ?b . match(?b, "lectures | curator")
+
+-- With many values and few of them matching, the index finds them, reading
+-- the rarest word's list: it shows the words and how many values each is in.
+insert ?id note ?text from csv "examples/data/notes.csv" ( key: id )
+insert /special note "a river of amber"
+\explain select ?n where ?n note (match "river amber")
+select ?n where ?n note (match "river amber")
+
+-- With the subject known, it is cheaper to test the value.
+\explain select ?b where /ann bio ?b . match(?b, "paris")
+
+-- A value stays indexed after its link is deleted, and the pattern decides
+-- what is live: the same as an `as of` query seeing an older graph.
+delete /ann bio "Curator at the Louvre, born in Paris"
+select ?n by ?n where ?p bio (match "paris") ; name ?n
+
+-- `\reindex` rebuilds the index from the log.
+\reindex
+select ?n by ?n where ?p bio (match "orsay") ; name ?n

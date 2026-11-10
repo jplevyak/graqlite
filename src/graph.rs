@@ -120,7 +120,7 @@ use crate::record::{Link, LinkFields, LinkState, Linkage, Record, now};
 use crate::record_log::Entry;
 use crate::stats::{self, Stats};
 use crate::times::{self, Times};
-use crate::tuple_index::{self, Intersection, NUM_BUILTIN_INDEXES};
+use crate::tuple_index::{self, BuiltinIndex, Intersection, NUM_BUILTIN_INDEXES};
 
 /// The data of the value that is the predicate of key links.
 pub const KEY_PREDICATE: &[u8] = b"graqlite:key";
@@ -529,7 +529,59 @@ impl Graph {
             tuple_index::reindex(&mut local)?;
             local.indexes_rebuilt()?;
         }
+        Self::cover_text(&mut local)?;
         Self::with_stats(local)
+    }
+
+    /// Indexes the text of a database made before the text index: its table
+    /// is new and empty.  A crash while that is under way has every index
+    /// rebuilt, as the indexes are marked stale.
+    fn cover_text(local: &mut Local) -> Result<()> {
+        if tuple_index::text_covered(local) {
+            return Ok(());
+        }
+        if local.log().next_id() != local.log().start_id() {
+            local.begin_bulk()?;
+            tuple_index::index_text(local)?;
+            tuple_index::mark_text_covered(local)?;
+            local.indexes_rebuilt()?;
+        } else {
+            tuple_index::mark_text_covered(local)?;
+        }
+        Ok(())
+    }
+
+    /// Rebuilds the [text index](crate::text) from the log.  Commit first.
+    pub fn reindex_text(&mut self) -> Result<()> {
+        if self.is_reader() {
+            return Err(Error::InvalidArgument("a reader can't rebuild an index"));
+        }
+        if !self.local.log().is_clean() {
+            return Err(Error::InvalidArgument(
+                "commit before rebuilding the text index",
+            ));
+        }
+        self.local.begin_bulk()?;
+        self.local.reset_table(BuiltinIndex::Text.table())?;
+        tuple_index::index_text(&mut self.local)?;
+        tuple_index::mark_text_covered(&mut self.local)?;
+        Ok(self.local.indexes_rebuilt()?)
+    }
+
+    /// Makes dropping this graph like a crash: nothing more is flushed.
+    #[cfg(test)]
+    pub(crate) fn crash_for_test(&mut self) {
+        self.local.crash();
+    }
+
+    /// The index of the values containing each term.
+    pub(crate) fn text_table(&self) -> crate::local_table::TableRef<'_> {
+        self.local.table(BuiltinIndex::Text.table())
+    }
+
+    /// The disk space the text index takes, in bytes: `None` in memory.
+    pub fn text_index_bytes(&self) -> Option<u64> {
+        self.local.table_bytes(BuiltinIndex::Text.table())
     }
 
     /// The graph of `local`, loading its statistics and counting the entries
@@ -578,7 +630,9 @@ impl Graph {
         input: &mut impl Read,
     ) -> Result<Self> {
         options.tables = options.tables.max(NUM_BUILTIN_INDEXES);
-        Self::with_stats(Local::restore(prefix, options, input)?)
+        let mut local = Local::restore(prefix, options, input)?;
+        Self::cover_text(&mut local)?;
+        Self::with_stats(local)
     }
 
     /// Writes a snapshot of the graph, including entries not yet committed,

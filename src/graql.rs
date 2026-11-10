@@ -202,6 +202,15 @@
 //!   nearest of all, then joined: fewer, if the rest of the pattern keeps
 //!   fewer.  With a vector index on `P` (below), it is the index's search,
 //!   approximate; else exact, a scan of the links.
+//! - `(match "paris louvre")` tests an object for words: it has all of
+//!   them, in any case, as whole words (see [`text`](crate::text)), and
+//!   `|` separates alternatives (`"paris louvre | orsay"`).  The query can
+//!   be a `$param` or a variable.  `match(?v, "paris")` is the same test
+//!   anywhere a test goes.  Where the object is unknown the planner reads
+//!   the text index, which holds every value's words; else it tests the
+//!   value it has.  It tests the data of values, so not a node with no
+//!   data, and not a vector; a value is indexed up to 64 KiB.  `\reindex`
+//!   in the shell rebuilds the index from the log.
 //! - `<< s p o >>` is a link node: the live link `s p o`, as a node, to
 //!   make statements about links (`<< /a knows /b >> since 2019`).  Unlike
 //!   an RDF-star quoted triple, the link must be there.  `<< :?l s p o >>`
@@ -3114,6 +3123,14 @@ impl Parser {
                 Pattern::Compare(this, cmp, self.expr()?)
             } else if self.punct("~") {
                 Pattern::Test(Expr::Call(Func::Matches, vec![this, self.expr()?]))
+            } else if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("match"))
+                && !matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.token),
+                    Some(Token::Punct("("))
+                )
+            {
+                self.next();
+                Pattern::Test(Expr::Call(Func::TextMatch, vec![this, self.expr()?]))
             } else {
                 // A test whose first argument is the object, or a value it
                 // equals.

@@ -25,6 +25,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("\\subgraphs", "list the subgraphs, with their links"),
     ("\\drop NAME", "delete every definition of the rule NAME"),
     ("\\info", "summarize the database"),
+    ("\\reindex", "rebuild the full-text index from the log"),
     (
         "\\show ENTRY",
         "show an entry (#id, id, /key or value) and its live links",
@@ -526,6 +527,7 @@ impl Shell {
             "subgraphs" => self.subgraphs(),
             "drop" => return self.drop_rule(arg, origin),
             "info" => self.info(),
+            "reindex" => self.reindex(),
             "show" => self.show(arg),
             "explain" => self.explain(arg, origin),
             "begin" => self.begin(),
@@ -736,6 +738,9 @@ impl Shell {
                 graqlite::postings::PAGE / 1024
             )
             .map_err(|e| e.to_string())?;
+        }
+        if let Some(bytes) = self.g.text_index_bytes() {
+            writeln!(self.out, "text index:   {} KiB", bytes / 1024).map_err(|e| e.to_string())?;
         }
         // What queries computed, held in memory until the database closes.
         let ephemeral = self.g.ephemeral_count();
@@ -1146,6 +1151,15 @@ impl Shell {
             Box::new(BufWriter::new(file))
         };
         Ok(String::new())
+    }
+
+    fn reindex(&mut self) -> CommandResult {
+        if self.in_transaction {
+            return Err("\\reindex can't run in a transaction".into());
+        }
+        self.commit_graph()?;
+        self.g.reindex_text().map_err(|e| e.to_string())?;
+        Ok("rebuilt the text index".into())
     }
 
     fn compact(&mut self, arg: &str) -> CommandResult {
