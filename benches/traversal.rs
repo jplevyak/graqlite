@@ -108,8 +108,13 @@ impl Csr {
 
     /// The nodes reached from `start` by one or more edges, within `depth`.
     fn reach(&self, start: u32, depth: u32) -> usize {
+        self.reach_from(&[start], depth)
+    }
+
+    /// The nodes reached from any of `starts`, likewise.
+    fn reach_from(&self, starts: &[u32], depth: u32) -> usize {
         let mut seen = vec![false; self.offsets.len() - 1];
-        let mut queue = VecDeque::from([(start, 0)]);
+        let mut queue: VecDeque<(u32, u32)> = starts.iter().map(|&s| (s, 0)).collect();
         let mut count = 0;
         while let Some((i, d)) = queue.pop_front() {
             if d >= depth {
@@ -149,6 +154,17 @@ struct Data {
     nodes: Vec<u64>,
     calls: u64,
     dep: u64,
+    /// `picked`'s subjects are the definitions sampled, and `picked_node`'s
+    /// the last node of each; their object is `mark`.
+    picked: u64,
+    picked_node: u64,
+    mark: u64,
+}
+
+/// The definitions sampled.
+fn sample(e: &Edges) -> Vec<usize> {
+    let mut rng = Rng(42);
+    (0..SAMPLE).map(|_| rng.below(e.defs) as usize).collect()
 }
 
 fn load(e: &Edges) -> Data {
@@ -164,6 +180,17 @@ fn load(e: &Edges) -> Data {
     for &(a, b) in &e.dep {
         g.link(nodes[a as usize], dep, nodes[b as usize]).unwrap();
     }
+    let [picked, picked_node, mark] =
+        [&b"picked"[..], b"picked_node", b"mark"].map(|d| g.value(d).unwrap());
+    for d in sample(e) {
+        g.link(defs[d], picked, mark).unwrap();
+        g.link(
+            nodes[d * NODES as usize + NODES as usize - 1],
+            picked_node,
+            mark,
+        )
+        .unwrap();
+    }
     g.commit().unwrap();
     Data {
         g,
@@ -171,6 +198,9 @@ fn load(e: &Edges) -> Data {
         nodes,
         calls,
         dep,
+        picked,
+        picked_node,
+        mark,
     }
 }
 
@@ -180,6 +210,16 @@ fn reach(g: &Graph, start: u64, expr: PathExpr) -> usize {
     let x = q.var("x");
     q.group().path_expr(start, expr, x);
     q.select([x]);
+    q.run(g).unwrap().len()
+}
+
+/// The distinct entries a path reaches from any subject of `picked`: one
+/// query, which searches once from them all.
+fn reach_from_picked(g: &Graph, picked: u64, mark: u64, expr: PathExpr) -> usize {
+    let mut q = Query::new();
+    let (f, x) = (q.var("f"), q.var("x"));
+    q.group().pattern(f, picked, mark).path_expr(f, expr, x);
+    q.select([x]).distinct();
     q.run(g).unwrap().len()
 }
 
@@ -193,8 +233,7 @@ fn bench(c: &mut Criterion) {
     let a = arrays(&e);
     let data = load(&e);
     let g = &data.g;
-    let mut rng = Rng(42);
-    let some: Vec<usize> = (0..SAMPLE).map(|_| rng.below(e.defs) as usize).collect();
+    let some = sample(&e);
     // A definition of the first layer, and its first node: most of the
     // graph is below them.
     let top = 0usize;
@@ -236,6 +275,20 @@ fn bench(c: &mut Criterion) {
         })
     });
 
+    // The same of them all, each caller once: one query.
+    let starts: Vec<u32> = some.iter().map(|&d| d as u32).collect();
+    let want = a.called.reach_from(&starts, 3);
+    assert_eq!(
+        reach_from_picked(g, data.picked, data.mark, callers()),
+        want
+    );
+    group.bench_function(id("callers of 100 within 3, one query, graqlite"), |b| {
+        b.iter(|| black_box(reach_from_picked(g, data.picked, data.mark, callers())))
+    });
+    group.bench_function(id("callers of 100 within 3, arrays"), |b| {
+        b.iter(|| black_box(a.called.reach_from(&starts, 3)))
+    });
+
     // The closure of `dep` from one node: a large result.
     let closure = || PathExpr::Repeat(link(data.dep), 1, None);
     let start = (top as u64 * NODES + NODES - 1) as usize;
@@ -249,8 +302,24 @@ fn bench(c: &mut Criterion) {
         b.iter(|| black_box(a.dep.reach(start as u32, u32::MAX)))
     });
 
+    // The closure from the last node of each of 100 definitions, each node
+    // reached once: one query, where a query a start is 100 closures.
+    let starts: Vec<u32> = some
+        .iter()
+        .map(|&d| (d as u64 * NODES + NODES - 1) as u32)
+        .collect();
+    let want = a.dep.reach_from(&starts, u32::MAX);
+    let from_picked = || reach_from_picked(g, data.picked_node, data.mark, closure());
+    assert_eq!(from_picked(), want);
+    group.bench_function(id("dep closure from 100, one query, graqlite"), |b| {
+        b.iter(|| black_box(from_picked()))
+    });
+    group.bench_function(id("dep closure from 100, arrays"), |b| {
+        b.iter(|| black_box(a.dep.reach_from(&starts, u32::MAX)))
+    });
+
     // Level by level over `calls` in both directions, a set at a time, as
-    // a caller wanting each node's distance must.
+    // a caller wanting each node's distance had to.
     let levels = || {
         let mut seen = BTreeSet::from([data.defs[top]]);
         let mut frontier = vec![data.defs[top]];
@@ -299,6 +368,23 @@ fn bench(c: &mut Criterion) {
     });
     group.bench_function(id("levels over calls, arrays"), |b| {
         b.iter(|| black_box(array_levels()))
+    });
+    // The same as one query: each definition with its distance.
+    let distances = || {
+        let both = PathExpr::Alt(vec![
+            PathExpr::Link(data.calls),
+            PathExpr::Inverse(link(data.calls)),
+        ]);
+        let mut q = Query::new();
+        let (x, n) = (q.var("x"), q.var("n"));
+        q.group()
+            .path_expr(data.defs[top], PathExpr::Repeat(Box::new(both), 0, None), x)
+            .path_length(n);
+        q.run(g).unwrap().len()
+    };
+    assert_eq!(distances(), array_levels());
+    group.bench_function(id("levels over calls, one query, graqlite"), |b| {
+        b.iter(|| black_box(distances()))
     });
     group.finish();
 

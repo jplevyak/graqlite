@@ -176,8 +176,9 @@ history is kept without the application recording it.
   `DESCRIBE`, and federation.
 - **Cypher** and **GQL** model a property graph: relationships have
   properties of their own, which GraQL writes as statements about links.
-  - What they have that GraQL lacks: paths as values, shortest paths and
-    path modes; `WITH` pipelines; `MERGE`; and, in GQL, graph types.
+  - What they have that GraQL lacks: paths as values, weighted shortest
+    paths and path modes (GraQL gives a path's least number of links, `(p+
+    as ?n)`, and `lookup` the links of one such chain); `WITH` pipelines; `MERGE`; and, in GQL, graph types.
   - What GraQL has: recursive rules, with negation, beyond what quantified
     paths can express; `as of`; and its upserts are implicit (linking a
     live link returns it, and keys are unique).
@@ -203,7 +204,8 @@ history is kept without the application recording it.
 
 ## What GraQL still lacks
 
-- Paths as values, and shortest paths.
+- Paths as values, and weighted shortest paths (issue 035); the least
+  number of links is `(p+ as ?n)`.
 - `regex`, and typed literals (dates, language tags); values are untyped
   bytes (issue 009's option B would change that).
 - Named graphs in queries (the engine has subgraph fields).

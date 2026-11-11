@@ -326,6 +326,8 @@ impl Plan {
             &name,
             &mut text,
             Some(&mut sink),
+            super::exec::distinct_needs(&self.query, &self.query.selected(), self.query.distinct)
+                .as_deref(),
         );
         let steps = sink.steps;
         Profile {
@@ -404,7 +406,17 @@ impl Plan {
             counts: &p.counts,
             steps: Vec::new(),
         });
-        explain_group(q, &self.root, 0, true, name, &mut out, sink.as_mut());
+        let needed = super::exec::distinct_needs(q, &q.selected(), q.distinct);
+        explain_group(
+            q,
+            &self.root,
+            0,
+            true,
+            name,
+            &mut out,
+            sink.as_mut(),
+            needed.as_deref(),
+        );
         let var = |v: Var| q.var_name(v);
         // Nested limits, after matching: each within the values of those
         // before it.
@@ -560,6 +572,7 @@ impl Step {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn explain_group(
     q: &Query,
     plan: &GroupPlan,
@@ -568,10 +581,17 @@ fn explain_group(
     name: Namer<'_>,
     out: &mut String,
     mut sink: Option<&mut Sink<'_>>,
+    needed: Option<&[Var]>,
 ) {
     let pad = "  ".repeat(depth);
     let mut first = alone;
-    for step in plan.steps.iter() {
+    // The path step searched once from all its rows, if the group is run
+    // alone for a consumer of distinct rows (see `exec::merged_path`).
+    let params = q.param_mask();
+    let merged = needed
+        .and_then(|n| super::exec::merged_path(plan, &params, &params, n))
+        .map(|(i, _)| i);
+    for (at, step) in plan.steps.iter().enumerate() {
         let start = out.len();
         let slot = sink.as_deref_mut().map(|s| {
             s.steps.push(StepProfile::default());
@@ -621,12 +641,17 @@ fn explain_group(
                         name,
                         out,
                         sink.as_deref_mut(),
+                        None,
                     );
                 }
                 first = false;
             }
             Step::Path { path, rows } => {
-                let how = if first { "scan" } else { "bind join" };
+                let how = match (first, merged == Some(at)) {
+                    (true, _) => "scan",
+                    (false, true) => "search from all rows at once",
+                    (false, false) => "bind join",
+                };
                 let _ = writeln!(
                     out,
                     "{pad}{how} {}, rows ~{rows:.0}",
@@ -666,7 +691,16 @@ fn explain_group(
                         let _ = writeln!(out, "{pad}  searching, once:");
                     }
                 }
-                explain_group(q, scan, depth + 2, true, name, out, sink.as_deref_mut());
+                explain_group(
+                    q,
+                    scan,
+                    depth + 2,
+                    true,
+                    name,
+                    out,
+                    sink.as_deref_mut(),
+                    None,
+                );
                 first = false;
             }
             Step::Text {
@@ -705,11 +739,11 @@ fn explain_group(
                     Join::Bind => "for the rows",
                     Join::Hash => "once",
                 };
-                let keys: Vec<String> = keys.iter().map(|&v| q.var_name(v)).collect();
+                let key_names: Vec<String> = keys.iter().map(|&v| q.var_name(v)).collect();
                 let _ = writeln!(
                     out,
                     "{pad}not ({how}, on {}), rows ~{rows:.0}:",
-                    keys.join(", ")
+                    key_names.join(", ")
                 );
                 explain_group(
                     q,
@@ -719,6 +753,8 @@ fn explain_group(
                     name,
                     out,
                     sink.as_deref_mut(),
+                    // Run once, it is asked only which keys match.
+                    (*join == Join::Hash).then_some(keys.as_slice()),
                 );
             }
             Step::Optional {
@@ -744,6 +780,7 @@ fn explain_group(
                     name,
                     out,
                     sink.as_deref_mut(),
+                    None,
                 );
                 first = false;
             }
@@ -761,9 +798,27 @@ fn explain_group(
                     "{pad}not changing to {to}, of {} keys, rows ~{rows:.0}; was:",
                     flips.len()
                 );
-                explain_group(q, old, depth + 1, false, name, out, sink.as_deref_mut());
+                explain_group(
+                    q,
+                    old,
+                    depth + 1,
+                    false,
+                    name,
+                    out,
+                    sink.as_deref_mut(),
+                    None,
+                );
                 let _ = writeln!(out, "{pad}is:");
-                explain_group(q, new, depth + 1, false, name, out, sink.as_deref_mut());
+                explain_group(
+                    q,
+                    new,
+                    depth + 1,
+                    false,
+                    name,
+                    out,
+                    sink.as_deref_mut(),
+                    None,
+                );
             }
         }
         if let (Some(s), Some(slot)) = (sink.as_deref_mut(), slot) {

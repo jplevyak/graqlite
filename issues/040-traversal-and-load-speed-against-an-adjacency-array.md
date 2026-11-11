@@ -121,6 +121,88 @@ Not profiled; from reading the code.
 - **Loading** is 5 µs a link in memory with nothing flushed: three index
   tables and the statistics per link.
 
+## Profile, and the first fixes
+
+Profiled 2026-11-11 with callgrind (instructions, not time) on the bench
+at 600 definitions. It corrects the list above in two places.
+
+- **The closure:** two thirds of `Automaton::reach` was its own
+  bookkeeping, not storage: 32% building a `HashSet` for the states
+  reachable without a link, once per neighbour; 20% the seen set
+  (SipHash); 14% the step cache and its clones. The step was the other
+  34%: the index lookup 15% (it parses the whole 128 byte bucket, about
+  six records), the liveness check 13%.
+- **Small results:** planning is 12% of `Query::run` and the search 80%,
+  so the 29 µs is the same cost a node, over the 36 steps such a query
+  takes, and not a fixed cost. A prepared path query would save little;
+  that task is dropped.
+- **The build:** 67% of `add_link` is the index, five table inserts a
+  link, and 40% of an insert is parsing the bucket it appends to.
+- **The level-by-level walk** was quadratic as guessed: `IdSet::extend`
+  sorts the whole set when ids arrive out of order, and the links of one
+  id don't follow those of the id before.
+
+Fixed since: `query_property`, `links_at` and the scan of every predicate
+gather their links and sort once; the automaton keeps, for each state, the
+states that matter of those reachable without a link (the accepting one and
+those with a step), so the search visits fewer pairs and builds no set; the
+seen set and the executor's neighbour cache hash ids with a multiply
+(`id_hash`); a step fills a reused buffer; and a path lookup builds its
+automaton once, not once a row.
+
+| Benchmark | 2,000 definitions: before | after | Ratio to arrays | 7,500 definitions: before | after | Ratio to arrays |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 × callers within 3 | 2.92 ms | 2.16 ms | 59× | 3.51 ms | 2.61 ms | 54× |
+| dep closure | 183 ms | 71 ms | 72× | 921 ms | 340 ms | 77× |
+| levels over calls | 5.21 ms | 2.84 ms | 80× | 71.7 ms | 12.1 ms | 71× |
+| build | 442 ms | 454 ms | | 1,651 ms | 1,704 ms | |
+
+The walk is now linear in the frontier, and the closure costs 1.0 to 1.3 µs
+a node reached at either size. (The machine had other load while these
+were taken, and a run can be off by a third: a first measurement of the
+larger closure gave 624 ms, and three since 332 to 368 ms.) What remains
+of a step is the index lookup and the read of the log, which only the
+adjacency below removes.
+
+## Multi-source reach and path length
+
+Added 2026-11-11, both as general features of the query engine and GraQL.
+
+- **One search from all the rows.** A path joined to rows that bind one of
+  its ends is searched once from them all (`Automaton::reach_from`) when
+  only the far ends are wanted, each once: a `distinct` query that selects,
+  orders by and later reads nothing bound before the path, and that
+  computes and records nothing; or a negation run once (a hash anti-join),
+  which is asked only which keys match. The rows are the same. It is
+  chosen when the query runs, from what its consumer reads, and `explain`
+  says `search from all rows at once`. No syntax: `select distinct ?x where
+  ?f changed true . ?f (imports+) ?x`.
+- **Not done of it:** `count(distinct ?x)` and other aggregates still
+  search from each row, as does a path followed by a union, an optional
+  group, a negation, a call or a search (only patterns, paths and filters
+  after it are checked for what they read).
+- **Path length.** `?s (expr as ?n) ?o` (`Group::path_length`) binds the
+  least number of links of a chain the expression follows between each
+  pair, as a number; the pattern still matches each pair once. Every link
+  of the expression counts, and the empty path is 0. A length that is
+  known, `as 2` or a variable bound elsewhere, is required instead, of the
+  shortest chain (so it differs from `{2}`), compared as a number. It is
+  the length of the chain `lookup` reports. A path giving its length is
+  searched breadth first from each row.
+
+| Benchmark | 2,000 definitions | arrays | 7,500 definitions | arrays |
+| --- | ---: | ---: | ---: | ---: |
+| callers of 100 within 3, one query | 857 µs | 7.4 µs | 1.47 ms | 15.7 µs |
+| the same, a query a start (above) | 2.16 ms | 36.5 µs | 2.61 ms | 48.7 µs |
+| dep closure from 100, one query | 79.1 ms | 1.09 ms | 420 ms | 4.76 ms |
+| the same, a query a start (100 × dep closure) | 7.1 s | | 34 s | |
+| levels over calls, one query with lengths | 3.16 ms | 35.3 µs | 13.4 ms | 172 µs |
+| the same, level by level with `follow_*` (above) | 2.84 ms | | 12.1 ms | |
+
+The one query for distances is no faster than the walk now that the walk
+is linear; it is one query in place of a loop in the caller, and 5 times
+faster than the walk was at the larger size.
+
 ## Design
 
 - **A compact adjacency per (predicate, commit),** built on first use and
@@ -147,13 +229,16 @@ Not profiled; from reading the code.
 
 - [x] A bench on a graph of this shape, beside adjacency arrays
       (`benches/traversal.rs`)
-- [ ] Profile the closure and the level-by-level walk in it, and confirm
-      or correct the list above
-- [ ] Fix `query_property`'s per-id extend
-- [ ] Prepared path queries; cache the automaton
+- [x] Profile the closure in it, and confirm or correct the list above
+      (the level-by-level walk was read, not profiled)
+- [x] Fix `query_property`'s per-id extend
+- [x] Cache the automaton, and a search that allocates nothing per step
+      (prepared path queries dropped: planning is 12% of a small query)
 - [ ] The adjacency cache per predicate and commit, shared with 035, with
       a delta for commits; path search and `follow_*` on it
-- [ ] Multi-source reach; path length as a value
+- [x] Multi-source reach; path length as a value
+- [ ] Multi-source reach for `count(distinct …)`, and past the steps not
+      yet checked for what they read
 - [ ] Bulk load building sorted index entries per batch
 - [x] The bench's numbers in `BENCHMARKS.md`, to compare each fix with
 

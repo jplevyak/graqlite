@@ -15,7 +15,7 @@ read them without running anything.
 | [07-history-and-links](07-history-and-links.graql) | link nodes `<< s p o >>` (statements about links, nested, named), `as of` an id or a time, for statements and groups |
 | [08-optional](08-optional.graql) | `optional ( ... )` and the `-` modifier, nesting, unbound variables in comparisons, negations and templates |
 | [09-aggregates](09-aggregates.graql) | `count`, `sum`, `avg`, `min`, `max`, grouping, `as`, `having`, `by ... desc`, `limit` over groups |
-| [10-paths](10-paths.graql) | path expressions: `/` sequences, `^` inverse, `\|` alternatives, `*`, `+`, `{m,n}`, searched from either end |
+| [10-paths](10-paths.graql) | path expressions: `/` sequences, `^` inverse, `\|` alternatives, `*`, `+`, `{m,n}`, searched from either end; `as ?n` for a path's length; one search from all the rows of a `distinct` query |
 | [11-parameters](11-parameters.graql) | `$name` parameters and `\set`, `#id`, `limit` and `offset` for paging, numeric order in `by` |
 | [12-expressions](12-expressions.graql) | arithmetic, `let`, functions (text, numbers, `bound`, `when`, times), expressions in select, filters and aggregates |
 | [13-comparison](13-comparison.graql) | the GraQL side of [the comparison with GQL, Cypher, SPARQL and Gremlin](../docs/graql-comparison.md) |

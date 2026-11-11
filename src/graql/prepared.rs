@@ -203,7 +203,7 @@ fn fragile(g: &Graph, p: &Pattern) -> bool {
 fn fragile_paths(g: &Graph, p: &Pattern) -> bool {
     match p {
         Pattern::Window(_, w) if w.is_timed() => true,
-        Pattern::PathExpr(_, path, _) => missing_predicate(g, path),
+        Pattern::PathExpr(_, path, _, _) => missing_predicate(g, path),
         Pattern::Window(p, _) | Pattern::Not(p) | Pattern::Optional(p) => fragile_paths(g, p),
         Pattern::And(ps) | Pattern::Or(ps) => ps.iter().any(|p| fragile_paths(g, p)),
         _ => false,

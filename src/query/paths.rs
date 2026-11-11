@@ -12,6 +12,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
+use crate::id_hash::{IdHashSet, IdMap};
+
 /// The most times a bounded repetition may give, so that compiling it
 /// stays small.
 pub const MAX_REPEAT: u32 = 64;
@@ -137,6 +139,12 @@ pub struct Automaton {
     transitions: Vec<Vec<(Option<Step>, usize)>>,
     start: usize,
     accept: usize,
+    /// Each state's transitions by a step.
+    moves: Vec<Vec<(Step, usize)>>,
+    /// The states that matter of those reachable from each state by
+    /// transitions that take no link: the accepting state, and those with
+    /// a transition by a step.  A search need visit no others.
+    live: Vec<Vec<usize>>,
 }
 
 impl Automaton {
@@ -147,10 +155,25 @@ impl Automaton {
             transitions: Vec::new(),
             start: 0,
             accept: 0,
+            moves: Vec::new(),
+            live: Vec::new(),
         };
         let (start, accept) = a.build(expr, forward);
         a.start = start;
         a.accept = accept;
+        a.moves = a
+            .transitions
+            .iter()
+            .map(|ts| ts.iter().filter_map(|&(s, to)| Some((s?, to))).collect())
+            .collect();
+        a.live = (0..a.transitions.len())
+            .map(|s| {
+                let mut live = a.closure([s]);
+                live.retain(|&t| t == a.accept || !a.moves[t].is_empty());
+                live.sort_unstable();
+                live
+            })
+            .collect();
         a
     }
 
@@ -251,37 +274,86 @@ impl Automaton {
     }
 
     /// The entries reachable from `start` by a path the automaton accepts,
-    /// sorted, with `next(step, x)` the entries one link from `x`.
-    pub fn reach(&self, start: u64, mut next: impl FnMut(Step, u64) -> Vec<u64>) -> Vec<u64> {
-        let mut seen: HashSet<(u64, usize)> = HashSet::new();
-        let mut queue: VecDeque<(u64, usize)> = VecDeque::new();
-        let mut out = HashSet::new();
-        for s in self.closure([self.start]) {
-            if seen.insert((start, s)) {
-                queue.push_back((start, s));
+    /// sorted, with `next(step, x, out)` adding to `out` the entries one
+    /// link from `x`.
+    pub fn reach(&self, start: u64, next: impl FnMut(Step, u64, &mut Vec<u64>)) -> Vec<u64> {
+        self.reach_from(&[start], next)
+    }
+
+    /// The entries reachable from any of `starts`, sorted: the union of
+    /// [`reach`](Self::reach) from each, found by one search, so that what
+    /// several starts reach is visited once.
+    pub fn reach_from(
+        &self,
+        starts: &[u64],
+        mut next: impl FnMut(Step, u64, &mut Vec<u64>),
+    ) -> Vec<u64> {
+        // Each pair of an entry and a state is visited once, in any order.
+        let mut seen: IdHashSet<(u64, usize)> = IdHashSet::default();
+        let mut stack: Vec<(u64, usize)> = Vec::new();
+        let mut out = Vec::new();
+        let mut ys = Vec::new();
+        for &start in starts {
+            for &s in &self.live[self.start] {
+                if seen.insert((start, s)) {
+                    stack.push((start, s));
+                }
             }
         }
-        let mut next_cache: HashMap<(Step, u64), Vec<u64>> = HashMap::new();
-        while let Some((x, s)) = queue.pop_front() {
+        while let Some((x, s)) = stack.pop() {
             if s == self.accept {
-                out.insert(x);
+                out.push(x);
             }
-            for &(step, to) in &self.transitions[s] {
-                let Some(step) = step else { continue };
-                let ys = next_cache
-                    .entry((step, x))
-                    .or_insert_with(|| next(step, x))
-                    .clone();
-                for y in ys {
-                    for t in self.closure([to]) {
+            for &(step, to) in &self.moves[s] {
+                ys.clear();
+                next(step, x, &mut ys);
+                for &y in &ys {
+                    for &t in &self.live[to] {
                         if seen.insert((y, t)) {
-                            queue.push_back((y, t));
+                            stack.push((y, t));
                         }
                     }
                 }
             }
         }
-        let mut out: Vec<u64> = out.into_iter().collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// The entries reachable from `start`, sorted, each with the least
+    /// number of links of a path the automaton accepts to it: 0 for `start`
+    /// itself, if the empty path is accepted.  The search is breadth first,
+    /// so a pair of an entry and a state is first reached by a shortest
+    /// path.
+    pub fn reach_lengths(
+        &self,
+        start: u64,
+        mut next: impl FnMut(Step, u64, &mut Vec<u64>),
+    ) -> Vec<(u64, u32)> {
+        let mut seen: IdHashSet<(u64, usize)> = IdHashSet::default();
+        let mut queue: VecDeque<(u64, usize, u32)> = VecDeque::new();
+        let mut out = Vec::new();
+        let mut ys = Vec::new();
+        for &s in &self.live[self.start] {
+            seen.insert((start, s));
+            queue.push_back((start, s, 0));
+        }
+        while let Some((x, s, n)) = queue.pop_front() {
+            if s == self.accept {
+                out.push((x, n));
+            }
+            for &(step, to) in &self.moves[s] {
+                ys.clear();
+                next(step, x, &mut ys);
+                for &y in &ys {
+                    for &t in &self.live[to] {
+                        if seen.insert((y, t)) {
+                            queue.push_back((y, t, n + 1));
+                        }
+                    }
+                }
+            }
+        }
         out.sort_unstable();
         out
     }
@@ -297,9 +369,9 @@ impl Automaton {
     ) -> Option<Vec<u64>> {
         type Pair = (u64, usize);
         // Each pair reached: the pair it was reached from, and by which link.
-        let mut parent: HashMap<Pair, Option<(Pair, u64)>> = HashMap::new();
+        let mut parent: IdMap<Pair, Option<(Pair, u64)>> = IdMap::default();
         let mut queue: VecDeque<Pair> = VecDeque::new();
-        for s in self.closure([self.start]) {
+        for &s in &self.live[self.start] {
             if parent.insert((start, s), None).is_none() {
                 queue.push_back((start, s));
             }
@@ -316,14 +388,13 @@ impl Automaton {
                 links.reverse();
                 return Some(links);
             }
-            for &(step, to) in &self.transitions[s] {
-                let Some(step) = step else { continue };
+            for &(step, to) in &self.moves[s] {
                 let ys = next_cache
                     .entry((step, x))
                     .or_insert_with(|| next(step, x))
                     .clone();
                 for (link, y) in ys {
-                    for t in self.closure([to]) {
+                    for &t in &self.live[to] {
                         if let std::collections::hash_map::Entry::Vacant(e) = parent.entry((y, t)) {
                             e.insert(Some(((x, s), link)));
                             queue.push_back((y, t));
@@ -357,7 +428,7 @@ mod tests {
     }
 
     fn reach(e: &PathExpr, start: u64, forward: bool) -> Vec<u64> {
-        Automaton::new(e, forward).reach(start, next)
+        Automaton::new(e, forward).reach(start, |step, x, out| out.extend(next(step, x)))
     }
 
     #[test]
@@ -405,6 +476,64 @@ mod tests {
             reach(&Repeat(Box::new(p()), 1, None), 13, false),
             [10, 11, 12]
         );
+    }
+
+    #[test]
+    fn lengths_and_many_starts() {
+        use PathExpr::*;
+        let p = || Link(1);
+        let q = || Link(2);
+        let lengths = |e: &PathExpr, start: u64, forward: bool| {
+            Automaton::new(e, forward)
+                .reach_lengths(start, |step, x, out| out.extend(next(step, x)))
+        };
+        let plus = Repeat(Box::new(p()), 1, None);
+        assert_eq!(lengths(&plus, 10, true), [(11, 1), (12, 2), (13, 3)]);
+        assert_eq!(lengths(&plus, 13, false), [(10, 3), (11, 2), (12, 1)]);
+        let star = Repeat(Box::new(p()), 0, None);
+        assert_eq!(lengths(&star, 12, true), [(12, 0), (13, 1)]);
+        // Around the cycle a -> b -> c -> d -> a, by either predicate: the
+        // start is reached again, by the 4 links of the cycle.
+        let any = Repeat(Box::new(Alt(vec![p(), q()])), 1, None);
+        assert_eq!(
+            lengths(&any, 10, true),
+            [(10, 4), (11, 1), (12, 2), (13, 3), (20, 1)]
+        );
+        // Both ways, the far side of the cycle is nearer backward.
+        let both = Repeat(
+            Box::new(Alt(vec![any.clone(), Inverse(Box::new(q()))])),
+            1,
+            None,
+        );
+        assert_eq!(lengths(&both, 10, true)[3], (13, 1));
+        // Every link of a sequence counts, and the least of the chains.
+        let seq = Seq(vec![plus.clone(), q()]);
+        assert_eq!(lengths(&seq, 11, true), [(10, 3)]);
+        // Each length is that of the shortest path `witness` finds.
+        for (y, n) in lengths(&any, 10, true) {
+            let links = Automaton::new(&any, true)
+                .witness(10, y, |step, x| {
+                    next(step, x)
+                        .into_iter()
+                        .map(|y| (x * 100 + y, y))
+                        .collect()
+                })
+                .expect("reached");
+            assert_eq!(links.len() as u32, n);
+        }
+
+        let from = |e: &PathExpr, starts: &[u64]| {
+            Automaton::new(e, true).reach_from(starts, |step, x, out| out.extend(next(step, x)))
+        };
+        assert_eq!(from(&plus, &[11, 12]), [12, 13]);
+        assert_eq!(from(&plus, &[]), [] as [u64; 0]);
+        assert_eq!(from(&Seq(vec![p(), p()]), &[10, 11, 10]), [12, 13]);
+        for starts in [&[10u64, 13][..], &[12, 20, 11]] {
+            let mut each: Vec<u64> = starts.iter().flat_map(|&s| reach(&any, s, true)).collect();
+            each.sort_unstable();
+            each.dedup();
+            assert_eq!(from(&any, starts), each);
+        }
     }
 
     #[test]

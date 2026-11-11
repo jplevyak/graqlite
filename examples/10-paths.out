@@ -59,3 +59,38 @@ INSERT 8
  parent         | /cat
  parent         | /dan
 (6 rows)
+ d    | n
+------+---
+ /ben | 1
+ /cat | 2
+ /dan | 3
+(3 rows)
+ x    | n
+------+---
+ /cat | 0
+ /ben | 1
+ /dan | 1
+ /eve | 1
+ /ann | 2
+(5 rows)
+ d
+------
+ /dan
+(1 row)
+ nearest
+---------
+ 1
+(1 row)
+INSERT 2
+ x
+------
+ /cat
+ /dan
+ /fay
+ /gus
+ /hal
+(5 rows)
+scan (?who moved true) via predicate+object index, rows ~2
+search from all rows at once (?who ((parent | knows | likes)+) ?x), rows ~16
+distinct
+order by data(?x)

@@ -285,7 +285,7 @@ fn path_steps(
     ids: &mut BTreeSet<u64>,
 ) {
     match p {
-        Pattern::PathExpr(_, path, _) => {
+        Pattern::PathExpr(_, path, _, _) => {
             let mut steps = Vec::new();
             path.steps(&mut steps);
             for step in steps {

@@ -25,6 +25,7 @@ use super::{
     SortKey, TemplateNode, Term, Var, expr, paths,
 };
 use crate::graph::{EPHEMERAL, Error, Graph, Result};
+use crate::id_hash::{IdHashSet, IdMap};
 use crate::local_table::{IdSet, Ids};
 use crate::record::Linkage;
 use crate::tuple_index::{self, Intersection, LinkKey};
@@ -321,7 +322,22 @@ struct PathLookup {
     overlay: Option<Shared>,
     /// The other ends of the live links from (or, if not forward, to) a node
     /// with a predicate: by predicate, node and direction.
-    neighbors: HashMap<(u64, u64, bool), Arc<Vec<u64>>>,
+    neighbors: IdMap<(u64, u64, bool), Arc<Vec<u64>>>,
+    /// The automata of the pattern's path expression, followed forward and
+    /// backward, once built.
+    automata: [Option<paths::Automaton>; 2],
+    /// The hold of the ephemeral ids the query gives, if any, and the
+    /// values of the lengths given so far.
+    hold: Option<crate::graph::EphemeralHold>,
+    numbers: IdMap<u32, u64>,
+}
+
+/// A path expression's automaton, taken from `lookup` while a search
+/// borrows it, or built.
+fn automaton_of(lookup: &mut PathLookup, expr: &PathExpr, forward: bool) -> paths::Automaton {
+    lookup.automata[usize::from(forward)]
+        .take()
+        .unwrap_or_else(|| paths::Automaton::new(expr, forward))
 }
 
 impl PathLookup {
@@ -352,7 +368,7 @@ impl PathLookup {
 
     /// The nodes reachable from `start` by one or more links with `p`.
     fn reach(&mut self, g: &Graph, p: u64, start: u64, forward: bool) -> Vec<u64> {
-        let mut seen = HashSet::new();
+        let mut seen = IdHashSet::default();
         let mut stack = vec![start];
         let mut out = Vec::new();
         while let Some(x) = stack.pop() {
@@ -387,10 +403,12 @@ impl PathLookup {
             }
         };
         let reach = |this: &mut Self, from: u64, forward: bool| -> Vec<u64> {
-            let automaton = paths::Automaton::new(expr, forward);
-            automaton.reach(from, |step, x| {
-                this.neighbors(g, step.predicate, x, step.forward).to_vec()
-            })
+            let automaton = automaton_of(this, expr, forward);
+            let reached = automaton.reach(from, |step, x, out| {
+                out.extend_from_slice(&this.neighbors(g, step.predicate, x, step.forward))
+            });
+            this.automata[usize::from(forward)] = Some(automaton);
+            reached
         };
         match (s, o) {
             (Some(s), Some(o)) => {
@@ -414,22 +432,7 @@ impl PathLookup {
                         "a path expression that may be empty needs one of its ends known",
                     ));
                 }
-                // Every entry a path can start from: the subjects and
-                // objects of links with its predicates.
-                let mut predicates = Vec::new();
-                expr.predicates(&mut predicates);
-                predicates.sort_unstable();
-                predicates.dedup();
-                let mut starts = Vec::new();
-                for p in predicates {
-                    let links = overlay::predicate_links(g, self.overlay.as_deref(), p, self.as_of);
-                    for (_, [ls, _, lo]) in links {
-                        starts.extend([ls, lo]);
-                    }
-                }
-                starts.sort_unstable();
-                starts.dedup();
-                for s in starts {
+                for s in self.all_starts(g, expr) {
                     for o in reach(self, s, true) {
                         emit(s, o, out);
                     }
@@ -440,9 +443,298 @@ impl PathLookup {
     }
 }
 
+impl PathLookup {
+    /// Every entry a path can start from: the subjects and objects of links
+    /// with its predicates.
+    fn all_starts(&self, g: &Graph, expr: &PathExpr) -> Vec<u64> {
+        let mut predicates = Vec::new();
+        expr.predicates(&mut predicates);
+        predicates.sort_unstable();
+        predicates.dedup();
+        let mut starts = Vec::new();
+        for p in predicates {
+            let links = overlay::predicate_links(g, self.overlay.as_deref(), p, self.as_of);
+            for (_, [ls, _, lo]) in links {
+                starts.extend([ls, lo]);
+            }
+        }
+        starts.sort_unstable();
+        starts.dedup();
+        starts
+    }
+
+    /// The value that is the number `n`: the graph's, or an ephemeral one.
+    fn number(&mut self, g: &Graph, n: u32) -> u64 {
+        if let Some(&id) = self.numbers.get(&n) {
+            return id;
+        }
+        let data = n.to_string().into_bytes();
+        let id = match &self.hold {
+            Some(h) => h.value(g, &data),
+            None => g.ephemeral_value(&data),
+        };
+        self.numbers.insert(n, id);
+        id
+    }
+
+    /// Appends a row for each pair the path expression `expr` matches, with
+    /// the least number of links joining the pair as `length`: bound, or
+    /// required if `length` is known.
+    fn length_matches(
+        &mut self,
+        g: &Graph,
+        expr: &PathExpr,
+        length: Term,
+        row: &[u64],
+        out: &mut Batch,
+    ) -> Result<()> {
+        let (subject, object) = (self.path.subject, self.path.object);
+        let (s, o) = (self.value(subject, row), self.value(object, row));
+        // A length that is known is compared as a number, whatever value
+        // holds it; one that is no number is the length of no path.
+        let want = match self.value(length, row) {
+            Some(id) => match Cell::Id(id).number(g) {
+                Some(n) => Some(n),
+                None => return Ok(()),
+            },
+            None => None,
+        };
+        let reach = |this: &mut Self, from: u64, forward: bool| -> Vec<(u64, u32)> {
+            let automaton = automaton_of(this, expr, forward);
+            let reached = automaton.reach_lengths(from, |step, x, out| {
+                out.extend_from_slice(&this.neighbors(g, step.predicate, x, step.forward))
+            });
+            this.automata[usize::from(forward)] = Some(automaton);
+            reached
+        };
+        // The pairs, each with its length.
+        let mut pairs: Vec<(u64, u64, u32)> = Vec::new();
+        match (s, o) {
+            (Some(s), Some(o)) => {
+                let reached = reach(self, s, true);
+                if let Ok(i) = reached.binary_search_by_key(&o, |&(y, _)| y) {
+                    pairs.push((s, o, reached[i].1));
+                }
+            }
+            (Some(s), None) => {
+                pairs.extend(reach(self, s, true).into_iter().map(|(o, n)| (s, o, n)))
+            }
+            (None, Some(o)) => {
+                pairs.extend(reach(self, o, false).into_iter().map(|(s, n)| (s, o, n)))
+            }
+            (None, None) => {
+                if expr.nullable() {
+                    return Err(crate::graph::Error::InvalidArgument(
+                        "a path expression that may be empty needs one of its ends known",
+                    ));
+                }
+                for s in self.all_starts(g, expr) {
+                    pairs.extend(reach(self, s, true).into_iter().map(|(o, n)| (s, o, n)));
+                }
+            }
+        }
+        let bound = self.bound.clone();
+        let mut new = Vec::new();
+        for (s, o, n) in pairs {
+            let ends = [(subject, s), (object, o)];
+            let matched = match want {
+                Some(want) => want == f64::from(n) && extend_row(&bound, row, ends, &mut new),
+                None => {
+                    let number = self.number(g, n);
+                    extend_row(
+                        &bound,
+                        row,
+                        ends.into_iter().chain([(length, number)]),
+                        &mut new,
+                    )
+                }
+            };
+            if matched {
+                out.push(&new);
+            }
+        }
+        Ok(())
+    }
+
+    /// The entries the path reaches from any of `starts`: its objects, if
+    /// `forward`, or else its subjects.  The path is a path expression, or
+    /// has a constant predicate.
+    fn reach_all(&mut self, g: &Graph, starts: &[u64], forward: bool) -> Vec<u64> {
+        let expr = match (&self.path.expr, self.path.predicate) {
+            (Some(e), _) => Arc::clone(e),
+            (None, Term::Id(p)) => Arc::new(PathExpr::Repeat(Box::new(PathExpr::Link(p)), 1, None)),
+            (None, Term::Var(_)) => return Vec::new(),
+        };
+        let automaton = automaton_of(self, &expr, forward);
+        let reached = automaton.reach_from(starts, |step, x, out| {
+            out.extend_from_slice(&self.neighbors(g, step.predicate, x, step.forward))
+        });
+        self.automata[usize::from(forward)] = Some(automaton);
+        reached
+    }
+}
+
+/// Joins a path pattern to rows that only its far end is wanted of, and
+/// each once (see [`merged_path`]): one search from the near ends of all
+/// the rows, where a [`BindJoin`] searches from each.  What several rows
+/// reach is visited once, and comes out as one row.
+struct PathSet {
+    input: Option<Box<dyn Operator>>,
+    lookup: PathLookup,
+    /// Whether the rows bind the path's subject, and the search finds its
+    /// objects.
+    forward: bool,
+    rows: Batch,
+    pos: usize,
+}
+
+impl Operator for PathSet {
+    fn next(&mut self, g: &Graph, out: &mut Batch) -> Result<()> {
+        if let Some(mut input) = self.input.take() {
+            let mut rows = Batch::new(out.width);
+            drain(input.as_mut(), g, &mut rows)?;
+            if rows.is_empty() {
+                return Ok(());
+            }
+            let path = &self.lookup.path;
+            let (near, far) = if self.forward {
+                (path.subject, path.object)
+            } else {
+                (path.object, path.subject)
+            };
+            let mut starts: Vec<u64> = (0..rows.len())
+                .filter_map(|i| self.lookup.value(near, rows.row(i)))
+                .collect();
+            starts.sort_unstable();
+            starts.dedup();
+            // Nothing after reads what the rows bound, so any row stands
+            // for them all.
+            let row = rows.row(0).to_vec();
+            let bound = self.lookup.bound.clone();
+            let mut new = Vec::new();
+            for end in self.lookup.reach_all(g, &starts, self.forward) {
+                if extend_row(&bound, &row, [(far, end)], &mut new) {
+                    self.rows.push(&new);
+                }
+            }
+        }
+        while self.pos < self.rows.len() && !out.is_full() {
+            out.push(self.rows.row(self.pos));
+            self.pos += 1;
+        }
+        Ok(())
+    }
+}
+
+/// The variables a step binds in its rows.
+fn step_binds(step: &Step) -> Vec<Var> {
+    match step {
+        Step::Pattern { pattern, .. } => pattern.vars().collect(),
+        Step::Union { vars, .. } | Step::Optional { vars, .. } => vars.clone(),
+        Step::Path { path, .. } => path.vars().collect(),
+        Step::Call { call, .. } => call.vars().collect(),
+        Step::Nearest { nearest, .. } => nearest.vars().collect(),
+        Step::Text { value, .. } => vec![*value],
+        Step::Filter(_) | Step::Not { .. } | Step::NotChange { .. } => Vec::new(),
+    }
+}
+
+/// The variables a step reads or binds, if it is a step that is known to
+/// touch no others.
+fn step_uses(step: &Step) -> Option<Vec<Var>> {
+    let terms = |ts: &[Term]| ts.iter().filter_map(|t| t.var()).collect::<Vec<Var>>();
+    match step {
+        Step::Pattern { pattern, .. } => Some(pattern.vars().collect()),
+        Step::Path { path, .. } => Some(path.vars().collect()),
+        Step::Filter(filters) => Some(
+            filters
+                .iter()
+                .flat_map(|f| match f {
+                    Filter::Eq(a, b) | Filter::Ne(a, b) | Filter::Lt(a, b) => terms(&[*a, *b]),
+                    Filter::Compare(a, _, b) => terms(&[*a, *b]),
+                    Filter::Test(v, _) => vec![*v],
+                    Filter::Expr { vars, .. } => vars.clone(),
+                    Filter::Holds(e) => e.vars().into_iter().collect(),
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// The variables a query's consumer reads of its rows, if it wants each
+/// distinct row of them once and nothing else of the rows: those selected
+/// and ordered by, of a `distinct` query that computes and records nothing.
+pub(crate) fn distinct_needs(q: &super::Query, select: &[Var], distinct: bool) -> Option<Vec<Var>> {
+    (distinct && !q.computes() && !q.record && q.value_limits.is_empty()).then(|| {
+        select
+            .iter()
+            .copied()
+            .chain(q.order.iter().map(|k| k.var))
+            .collect()
+    })
+}
+
+/// The path step of `plan` that one search from all its rows can do, if
+/// there is one, and whether it searches forward: given that the rows start
+/// with `bound`, of which `params` are the same in every row, and that the
+/// consumer wants only the distinct values of `needed`.
+///
+/// It is a step whose rows bind one end of the path and not the other, when
+/// nothing the rows have bound until then is read after: not by a later
+/// step, and not by the consumer.  Then the rows differ, to anything after,
+/// only in the far ends they reach, and a far end reached from several rows
+/// is wanted once.  A path giving its length, or marking the rows it
+/// matches, says something of each pair, and is searched from each row.
+pub(crate) fn merged_path(
+    plan: &GroupPlan,
+    bound: &[bool],
+    params: &[bool],
+    needed: &[Var],
+) -> Option<(usize, bool)> {
+    let mut bound = bound.to_vec();
+    let is_param = |v: Var| params.get(v.0).copied().unwrap_or(false);
+    for (i, step) in plan.steps.iter().enumerate() {
+        if let Step::Path { path, .. } = step
+            && path.mark.is_none()
+            && path.length.is_none()
+            && (path.expr.is_some() || matches!(path.predicate, Term::Id(_)))
+        {
+            // An end the rows bind, and differ in.
+            let varies = |t: Term| t.var().is_some_and(|v| bound[v.0] && !is_param(v));
+            let free = |t: Term| t.var().is_some_and(|v| !bound[v.0]);
+            let forward = match (path.subject, path.object) {
+                (s, o) if varies(s) && free(o) => Some(true),
+                (s, o) if free(s) && varies(o) => Some(false),
+                _ => None,
+            };
+            let later: Option<Vec<Var>> = plan.steps[i + 1..]
+                .iter()
+                .map(step_uses)
+                .collect::<Option<Vec<_>>>()
+                .map(|uses| uses.concat());
+            if let (Some(forward), Some(later)) = (forward, later) {
+                let read = |v: Var| needed.contains(&v) || later.contains(&v);
+                let carried =
+                    (0..bound.len()).any(|k| bound[k] && !is_param(Var(k)) && read(Var(k)));
+                if !carried {
+                    return Some((i, forward));
+                }
+            }
+        }
+        for v in step_binds(step) {
+            bound[v.0] = true;
+        }
+    }
+    None
+}
+
 impl Lookup for PathLookup {
     fn matches(&mut self, g: &Graph, row: &[u64], out: &mut Batch) -> Result<()> {
         if let Some(expr) = self.path.expr.clone() {
+            if let Some(length) = self.path.length {
+                return self.length_matches(g, &expr, length, row, out);
+            }
             return self.expr_matches(g, &expr, row, out);
         }
         let path = self.path.clone();
@@ -983,11 +1275,11 @@ impl Matcher {
             Access::Object => tuple_index::find_links(local, Linkage::Object, v(o)),
             Access::All => {
                 let predicates: BTreeSet<u64> = g.stats().predicates().map(|(p, _)| p).collect();
-                let mut links = IdSet::new();
+                let mut links = Vec::new();
                 for p in predicates {
                     links.extend(tuple_index::find_links(local, Linkage::Predicate, p));
                 }
-                links
+                IdSet::from_unsorted(links)
             }
             Access::Graph => match p.graph.and_then(|t| self.value(t, row)) {
                 Some(sg) => tuple_index::find_links(local, Linkage::Subgraph, sg),
@@ -1590,7 +1882,7 @@ fn matched(
         ),
         None => (ctx.unit(), ctx.unbound()),
     };
-    let mut op = ctx.build(group, seed, &mut bound);
+    let mut op = ctx.build_for(group, seed, &mut bound, Some(keys));
     let mut matches = Batch::new(ctx.width);
     drain(op.as_mut(), g, &mut matches)?;
     Ok((0..matches.len())
@@ -1927,9 +2219,23 @@ impl Context {
         input: Box<dyn Operator>,
         bound: &mut [bool],
     ) -> Box<dyn Operator> {
+        self.build_for(plan, input, bound, None)
+    }
+
+    /// The same, for a consumer that wants only the distinct values of
+    /// `needed` of the rows, if given: a path step may then search once
+    /// from all its rows (see [`merged_path`]).
+    fn build_for(
+        &self,
+        plan: &GroupPlan,
+        input: Box<dyn Operator>,
+        bound: &mut [bool],
+        needed: Option<&[Var]>,
+    ) -> Box<dyn Operator> {
         let width = self.width;
         let mut op = input;
-        for step in plan.steps.iter() {
+        let merged = needed.and_then(|n| merged_path(plan, bound, &self.params, n));
+        for (at, step) in plan.steps.iter().enumerate() {
             let built: Box<dyn Operator> = match step {
                 Step::Pattern {
                     pattern,
@@ -2036,27 +2342,34 @@ impl Context {
                     joined
                 }
                 Step::Path { path, .. } => {
-                    let joined = Box::new(BindJoin {
-                        input: op,
-                        matcher: self.counted(
-                            step,
-                            marked(
-                                PathLookup {
-                                    path: path.clone(),
-                                    bound: bound.to_vec(),
-                                    as_of: path.as_of.or(self.as_of),
-                                    overlay: self.overlay.clone(),
-                                    neighbors: HashMap::new(),
-                                },
-                                path.mark,
-                            ),
-                        ),
-                        in_batch: Batch::new(width),
-                        in_pos: 0,
-                        pending: Batch::new(width),
-                        pending_pos: 0,
-                        streaming: false,
-                    });
+                    let lookup = PathLookup {
+                        path: path.clone(),
+                        bound: bound.to_vec(),
+                        as_of: path.as_of.or(self.as_of),
+                        overlay: self.overlay.clone(),
+                        neighbors: IdMap::default(),
+                        automata: [None, None],
+                        hold: self.hold.clone(),
+                        numbers: IdMap::default(),
+                    };
+                    let joined: Box<dyn Operator> = match merged {
+                        Some((i, forward)) if i == at => Box::new(PathSet {
+                            input: Some(op),
+                            lookup,
+                            forward,
+                            rows: Batch::new(width),
+                            pos: 0,
+                        }),
+                        _ => Box::new(BindJoin {
+                            input: op,
+                            matcher: self.counted(step, marked(lookup, path.mark)),
+                            in_batch: Batch::new(width),
+                            in_pos: 0,
+                            pending: Batch::new(width),
+                            pending_pos: 0,
+                            streaming: false,
+                        }),
+                    };
                     path.vars().for_each(|v| bound[v.0] = true);
                     joined
                 }
@@ -2381,10 +2694,12 @@ impl Plan {
         overlay: Option<&Shared>,
     ) -> Rows<'g> {
         let q = &self.query;
-        let (mut op, mut error, width) = match self.matched(g, values, overlay) {
-            Ok(m) => (m.op, None, m.width),
-            Err(e) => (unit(1, &[0]), Some(e), 1),
-        };
+        let needed = distinct_needs(q, &select, distinct);
+        let (mut op, mut error, width) =
+            match self.matched_for(g, values, overlay, needed.as_deref()) {
+                Ok(m) => (m.op, None, m.width),
+                Err(e) => (unit(1, &[0]), Some(e), 1),
+            };
         if error.is_none() && q.computes() {
             error = Some(Error::InvalidArgument(
                 "a query that computes values returns cells: see Plan::execute_cells",
@@ -2436,6 +2751,18 @@ impl Plan {
     /// deduplicated, ordered or limited, with `values` as the values of its
     /// parameters.
     fn matched(&self, g: &Graph, values: Given, overlay: Option<&Shared>) -> Result<Matched> {
+        self.matched_for(g, values, overlay, None)
+    }
+
+    /// The same, for a consumer that wants only the distinct values of
+    /// `needed` of the rows, if given.
+    fn matched_for(
+        &self,
+        g: &Graph,
+        values: Given,
+        overlay: Option<&Shared>,
+        needed: Option<&[Var]>,
+    ) -> Result<Matched> {
         // An overlay's links have no place in the log's order.
         if overlay.is_some() && self.query.uses_window() {
             return Err(Error::InvalidArgument(
@@ -2499,7 +2826,7 @@ impl Plan {
             hold: q.ephemeral_hold().cloned(),
             profiler: self.profiler.clone(),
         };
-        let op = ctx.build(&self.root, ctx.unit(), &mut ctx.unbound());
+        let op = ctx.build_for(&self.root, ctx.unit(), &mut ctx.unbound(), needed);
         Ok(Matched {
             op,
             start,

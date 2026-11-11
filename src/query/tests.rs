@@ -4710,3 +4710,382 @@ fn estimates_are_near_the_actual_rows_on_the_benches_shape() {
     q.reduction_budget(0);
     near(&q, 1.5);
 }
+
+/// The least number of links of a chain `expr` follows between each pair,
+/// naively: each part as a relation with lengths, composed.  An empty path
+/// joins each entry of the links, and `extra`, to itself, with no links.
+fn expr_lengths(
+    links: &[(u64, [u64; 3])],
+    expr: &PathExpr,
+    extra: impl IntoIterator<Item = u64>,
+) -> BTreeMap<(u64, u64), u32> {
+    type Lengths = BTreeMap<(u64, u64), u32>;
+    let mut universe: BTreeSet<u64> = links.iter().flat_map(|&(_, [s, _, o])| [s, o]).collect();
+    universe.extend(extra);
+    fn least(out: &mut Lengths, pair: (u64, u64), n: u32) {
+        let e = out.entry(pair).or_insert(n);
+        *e = n.min(*e);
+    }
+    fn compose(a: &Lengths, b: &Lengths) -> Lengths {
+        let mut out = Lengths::new();
+        for (&(x, m), &n) in a {
+            for (&(_, y), &k) in b.range((m, 0)..=(m, u64::MAX)) {
+                least(&mut out, (x, y), n + k);
+            }
+        }
+        out
+    }
+    fn lengths(links: &[(u64, [u64; 3])], universe: &BTreeSet<u64>, expr: &PathExpr) -> Lengths {
+        match expr {
+            PathExpr::Link(p) => links
+                .iter()
+                .filter(|&&(_, [_, lp, _])| lp == *p)
+                .map(|&(_, [s, _, o])| ((s, o), 1))
+                .collect(),
+            PathExpr::Inverse(e) => lengths(links, universe, e)
+                .into_iter()
+                .map(|((s, o), n)| ((o, s), n))
+                .collect(),
+            PathExpr::Seq(es) => es
+                .iter()
+                .map(|e| lengths(links, universe, e))
+                .reduce(|a, b| compose(&a, &b))
+                .unwrap(),
+            PathExpr::Alt(es) => {
+                let mut out = Lengths::new();
+                for e in es {
+                    for (pair, n) in lengths(links, universe, e) {
+                        least(&mut out, pair, n);
+                    }
+                }
+                out
+            }
+            PathExpr::Repeat(e, min, max) => {
+                let step = lengths(links, universe, e);
+                // No shortest chain repeats an entry after its required
+                // copies, so this many copies find them all.
+                let most = max.unwrap_or(*min + universe.len() as u32 + 1);
+                let mut power: Lengths = universe.iter().map(|&x| ((x, x), 0)).collect();
+                let mut out = Lengths::new();
+                for k in 0..=most {
+                    if k >= *min {
+                        for (&pair, &n) in &power {
+                            least(&mut out, pair, n);
+                        }
+                    }
+                    power = compose(&power, &step);
+                }
+                out
+            }
+        }
+    }
+    lengths(links, &universe, expr)
+}
+
+/// The number a value of a row is.
+fn number_of(g: &Graph, id: u64) -> u32 {
+    aggregate::Cell::Id(id).number(g).expect("a number") as u32
+}
+
+#[test]
+fn path_lengths_against_brute_force() {
+    let mut rng = Rng(0x1e57);
+    let (mut some, mut far) = (0, 0);
+    for round in 0..30 {
+        let (g, nodes, predicates) = random_graph_of(&mut rng, 12 + round);
+        let links = live_links(&g, None);
+        let ids = (g.start_id(), g.next_id());
+        for _ in 0..12 {
+            let mut expr = Generator {
+                rng: &mut rng,
+                nodes: &nodes,
+                predicates: &predicates,
+                ids,
+            }
+            .path_expr(2);
+            let start = rng.pick(&nodes);
+            // Sometimes one that may be empty, which needs an end known.
+            let nullable = rng.chance(25);
+            if nullable {
+                expr = PathExpr::Repeat(Box::new(expr), 0, None);
+            }
+            let expected = expr_lengths(&links, &expr, [start]);
+            some += usize::from(!expected.is_empty());
+            far += usize::from(expected.values().any(|&n| n >= 3));
+
+            // From a start, to an end, and every pair.
+            let mut q = Query::new();
+            let (x, n) = (q.var("x"), q.var("n"));
+            q.group().path_expr(start, expr.clone(), x).path_length(n);
+            let rows: BTreeMap<(u64, u64), u32> = q
+                .run(&g)
+                .unwrap()
+                .into_iter()
+                .map(|r| ((start, r[0]), number_of(&g, r[1])))
+                .collect();
+            let from: BTreeMap<(u64, u64), u32> = expected
+                .iter()
+                .filter(|&(&(s, _), _)| s == start)
+                .map(|(&pair, &n)| (pair, n))
+                .collect();
+            assert_eq!(rows, from, "{expr} from {start}");
+
+            let mut q = Query::new();
+            let (x, n) = (q.var("x"), q.var("n"));
+            q.group().path_expr(x, expr.clone(), start).path_length(n);
+            let rows: BTreeMap<(u64, u64), u32> = q
+                .run(&g)
+                .unwrap()
+                .into_iter()
+                .map(|r| ((r[0], start), number_of(&g, r[1])))
+                .collect();
+            let to: BTreeMap<(u64, u64), u32> = expected
+                .iter()
+                .filter(|&(&(_, o), _)| o == start)
+                .map(|(&pair, &n)| (pair, n))
+                .collect();
+            assert_eq!(rows, to, "{expr} to {start}");
+
+            if !nullable {
+                let mut q = Query::new();
+                let (x, y, n) = (q.var("x"), q.var("y"), q.var("n"));
+                q.group().path_expr(x, expr.clone(), y).path_length(n);
+                let run = q.run(&g).unwrap();
+                assert_eq!(run.len(), expected.len(), "{expr}: each pair once");
+                let rows: BTreeMap<(u64, u64), u32> = run
+                    .into_iter()
+                    .map(|r| ((r[0], r[1]), number_of(&g, r[2])))
+                    .collect();
+                assert_eq!(rows, expected, "{expr}");
+            }
+
+            // A length that is known is required: of the shortest chain.
+            for want in 0..4u32 {
+                let value = g.ephemeral_value(want.to_string().as_bytes());
+                let mut q = Query::new();
+                let x = q.var("x");
+                q.group()
+                    .path_expr(start, expr.clone(), x)
+                    .path_length(value);
+                let rows: BTreeSet<u64> = q.run(&g).unwrap().into_iter().map(|r| r[0]).collect();
+                let at: BTreeSet<u64> = from
+                    .iter()
+                    .filter(|&(_, &n)| n == want)
+                    .map(|(&(_, o), _)| o)
+                    .collect();
+                assert_eq!(rows, at, "{expr} from {start} as {want}");
+            }
+        }
+    }
+    assert!(some > 100 && far > 20, "{some} {far}");
+}
+
+#[test]
+fn path_length_joins_and_checks() {
+    let mut g = graph();
+    let [a, b, c, d] = [0; 4].map(|_| g.node().unwrap());
+    let (p, depth) = (g.value(b"p").unwrap(), g.value(b"depth").unwrap());
+    for (s, o) in [(a, b), (b, c), (c, d), (a, c)] {
+        g.link(s, p, o).unwrap();
+    }
+    // A stored number, and one written another way.
+    let two = g.value(b"2").unwrap();
+    let two_point = g.value(b"2.0").unwrap();
+    g.link(d, depth, two).unwrap();
+    g.link(c, depth, two_point).unwrap();
+    g.link(b, depth, two).unwrap();
+    let plus = || PathExpr::Repeat(Box::new(PathExpr::Link(p)), 1, None);
+
+    // The length joins a stored value, as a number: d is 2 links from a
+    // (through a p c), b only 1, and c is 1 link, not "2.0".
+    for path_first in [false, true] {
+        let mut q = Query::new();
+        let (x, n) = (q.var("x"), q.var("n"));
+        if path_first {
+            q.group()
+                .path_expr(a, plus(), x)
+                .path_length(n)
+                .pattern(x, depth, n);
+        } else {
+            q.group()
+                .pattern(x, depth, n)
+                .path_expr(a, plus(), x)
+                .path_length(n);
+        }
+        q.select([x]);
+        check_against(&q, &g, &[vec![d]]);
+    }
+    // The length is the stored value's id where the graph has one.
+    let mut q = Query::new();
+    let (x, n) = (q.var("x"), q.var("n"));
+    q.group().path_expr(a, plus(), x).path_length(n);
+    q.select([x, n]);
+    let rows = sorted(q.run(&g).unwrap());
+    assert_eq!(rows[2], vec![d, two]);
+    assert_eq!(number_of(&g, rows[0][1]), 1);
+
+    // It is the path expression's, and a variable of its own.
+    let mut q = Query::new();
+    let (x, n) = (q.var("x"), q.var("n"));
+    q.group().path(a, p, x).path_length(n);
+    assert!(q.run(&g).is_err());
+    let mut q = Query::new();
+    let x = q.var("x");
+    q.group().path_expr(a, plus(), x).path_length(x);
+    assert!(q.run(&g).is_err());
+    // A length that is no number is the length of nothing.
+    let mut q = Query::new();
+    let x = q.var("x");
+    q.group().path_expr(a, plus(), x).path_length(depth);
+    assert!(q.run(&g).unwrap().is_empty());
+
+    let mut q = Query::new();
+    let (x, n) = (q.var("x"), q.var("n"));
+    q.group().path_expr(a, plus(), x).path_length(n);
+    let name = |id: u64| id.to_string();
+    assert!(
+        q.plan(&g)
+            .unwrap()
+            .explain_with(&name)
+            .contains(&format!("({a} ({p}+ as ?n) ?x)")),
+        "{}",
+        q.plan(&g).unwrap().explain()
+    );
+}
+
+#[test]
+fn distinct_ends_are_searched_from_all_rows_at_once() {
+    const MERGED: &str = "search from all rows at once";
+    let mut rng = Rng(0xa11);
+    let (mut merged, mut reached) = (0, 0);
+    for round in 0..40 {
+        let (g, nodes, predicates) = random_graph_of(&mut rng, 20 + round * 2);
+        let ids = (g.start_id(), g.next_id());
+        for _ in 0..10 {
+            let expr = Generator {
+                rng: &mut rng,
+                nodes: &nodes,
+                predicates: &predicates,
+                ids,
+            }
+            .path_expr(2);
+            let forward = rng.chance(50);
+            let then = rng.chance(40);
+            let transitive = rng.chance(20);
+            let build = |distinct: bool| {
+                let mut q = Query::new();
+                let (f, x, y) = (q.var("f"), q.var("x"), q.var("y"));
+                q.pattern(f, predicates[0], nodes[0]);
+                let (s, o) = if forward { (f, x) } else { (x, f) };
+                if transitive {
+                    q.group().path(s, predicates[1], o);
+                } else {
+                    q.group().path_expr(s, expr.clone(), o);
+                }
+                // A step after reads the ends, not the rows before.
+                if then {
+                    q.pattern(x, predicates[2], y);
+                    q.select([x, y]);
+                } else {
+                    q.select([x]);
+                }
+                if distinct {
+                    q.distinct();
+                }
+                q
+            };
+            // The rows are those of a search from each row, each once.
+            let each: BTreeSet<Vec<u64>> = build(false).run(&g).unwrap().into_iter().collect();
+            let expected: Vec<Vec<u64>> = each.into_iter().collect();
+            let q = build(true);
+            check_against(&q, &g, &expected);
+            reached += usize::from(expected.len() > 1);
+            merged += usize::from(
+                plan::plan_with(&q, &g, Some(Join::Bind))
+                    .unwrap()
+                    .explain()
+                    .contains(MERGED),
+            );
+            // Not when each pair is asked for, or the rows aren't distinct.
+            let plain = plan::plan_with(&build(false), &g, Some(Join::Bind)).unwrap();
+            assert!(!plain.explain().contains(MERGED));
+        }
+    }
+    assert!(merged > 200 && reached > 100, "{merged} {reached}");
+}
+
+#[test]
+fn a_search_from_all_rows_keeps_what_is_read_after() {
+    const MERGED: &str = "search from all rows at once";
+    let mut g = graph();
+    let nodes: Vec<u64> = (0..8).map(|_| g.node().unwrap()).collect();
+    let [p, start, tag] = [&b"p"[..], b"start", b"tag"].map(|d| g.value(d).unwrap());
+    for w in nodes.windows(2) {
+        g.link(w[0], p, w[1]).unwrap();
+    }
+    for &n in &nodes[..3] {
+        g.link(n, start, tag).unwrap();
+    }
+    g.link(nodes[7], tag, nodes[0]).unwrap();
+    let plus = || PathExpr::Repeat(Box::new(PathExpr::Link(p)), 1, None);
+    let merges = |q: &Query| {
+        plan::plan_with(q, &g, Some(Join::Bind))
+            .unwrap()
+            .explain()
+            .contains(MERGED)
+    };
+
+    // The ends alone: one search, and each end once.
+    let mut q = Query::new();
+    let (f, x) = (q.var("f"), q.var("x"));
+    q.group().pattern(f, start, tag).path_expr(f, plus(), x);
+    q.select([x]).distinct();
+    assert!(merges(&q));
+    let expected: Vec<Vec<u64>> = nodes[1..].iter().map(|&n| vec![n]).collect();
+    check_against(&q, &g, &expected);
+
+    // The start selected, ordered by, or read by a later step: each pair.
+    let mut pairs = q.clone();
+    pairs.select([f, x]);
+    assert!(!merges(&pairs));
+    let mut ordered = q.clone();
+    ordered.order_by(SortKey::id(f));
+    assert!(!merges(&ordered));
+    let mut q = Query::new();
+    let (f, x) = (q.var("f"), q.var("x"));
+    q.group()
+        .pattern(f, start, tag)
+        .path_expr(f, plus(), x)
+        .pattern(x, tag, f);
+    q.select([x]).distinct();
+    assert!(!merges(&q));
+    check_against(&q, &g, &[vec![nodes[7]]]);
+    // A length is of each pair.
+    let mut q = Query::new();
+    let (f, x, n) = (q.var("f"), q.var("x"), q.var("n"));
+    q.group()
+        .pattern(f, start, tag)
+        .path_expr(f, plus(), x)
+        .path_length(n);
+    q.select([x]).distinct();
+    assert!(!merges(&q));
+    check_against(&q, &g, &expected);
+    // A start that is a parameter is one start.
+    let mut q = Query::new();
+    let (f, x) = (q.param("f"), q.var("x"));
+    q.group().path_expr(f, plus(), x);
+    q.select([x]).distinct();
+    assert!(!q.plan(&g).unwrap().explain().contains(MERGED));
+
+    // A negation run once is asked only which keys match.
+    let mut q = Query::new();
+    let (f, x) = (q.var("f"), q.var("x"));
+    let mut not = Group::new();
+    not.pattern(f, start, tag).path_expr(f, plus(), x);
+    let any = q.var("any");
+    q.pattern(x, p, any).not(not);
+    q.select([x]);
+    let plan = plan::plan_with(&q, &g, Some(Join::Hash)).unwrap();
+    assert!(plan.explain().contains(MERGED), "{}", plan.explain());
+    check_against(&q, &g, &[vec![nodes[0]]]);
+}

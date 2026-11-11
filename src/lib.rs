@@ -15,6 +15,8 @@ pub mod graph;
 pub mod graql;
 pub mod hnsw;
 #[cfg(all(unix, target_pointer_width = "64"))]
+mod id_hash;
+#[cfg(all(unix, target_pointer_width = "64"))]
 pub mod local;
 #[cfg(all(unix, target_pointer_width = "64"))]
 pub mod local_record_log;

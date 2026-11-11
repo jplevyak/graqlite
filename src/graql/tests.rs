@@ -504,9 +504,12 @@ fn rename_blanks(p: &mut Pattern, names: &mut HashMap<String, String>) {
             node(pr);
             node(o);
         }
-        Pattern::PathExpr(s, _, o) => {
+        Pattern::PathExpr(s, _, o, length) => {
             node(s);
             node(o);
+            if let Some(n) = length {
+                node(n);
+            }
         }
         Pattern::Link(l, s, pr, o) => {
             node(l);
@@ -763,6 +766,7 @@ fn print_round_trips() {
         "select ?y where ?x ((knows / likes)+ | ^\"two words\") ?y",
         "select ?y where ?x (a / ^a) ?y ; (p | q)++ ?z , ?w",
         "select ?y where ?x not (p | q) ?y ; (r+) ?z - . ?z p 1",
+        "select ?y, ?n where ?x (knows+ as ?n) ?y . ?x ((p | q)* as 2) ?z . ?x (p / q as $k) ?w",
         "select ?f where $who knows ?f ; age ?a . ?a > $min",
         "insert $who knows #12 where #12 a person",
         "select ?f by ?f limit 3 offset 6 where ?x knows ?f",
@@ -1558,6 +1562,48 @@ fn path_expressions() {
         ends(&mut g, "select ?y where /ann (parent{0,1}) ?y"),
         sorted(vec![ann, ben])
     );
+    // The length: the least number of links, bound or required.
+    let out = one(&mut g, "select ?y, ?n by ?n where /ann (parent+ as ?n) ?y");
+    let lengths: Vec<(u64, String)> = rows(&out)
+        .iter()
+        .map(|r| {
+            (
+                r[0],
+                String::from_utf8_lossy(&g.data(r[1]).unwrap()).into_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        lengths,
+        [(ben, "1"), (cat, "2"), (dan, "3")].map(|(y, n)| (y, n.to_string()))
+    );
+    assert_eq!(
+        ends(&mut g, "select ?y where /ann (parent+ as 2) ?y"),
+        [cat]
+    );
+    // Of the shortest chain: /dan is 3 links away, though `{1,3}` reaches
+    // it; and a chain of steps has its length.
+    assert_eq!(
+        ends(&mut g, "select ?y where /ann (parent{1,3} as 3) ?y"),
+        [dan]
+    );
+    assert_eq!(
+        ends(
+            &mut g,
+            "select ?y where /ann (parent / parent as ?n) ?y . ?n = 2"
+        ),
+        [cat]
+    );
+    for (text, why) in [
+        (
+            "select ?y where /ann (parent+ as /ben) ?y",
+            "a variable or a number",
+        ),
+        ("select ?y where /ann (parent+ as ?y) ?y", "of its own"),
+    ] {
+        let err = execute(&mut g, text).unwrap_err().to_string();
+        assert!(err.contains(why), "{text}: {err}");
+    }
     // Mixed: a step, then a repetition.
     assert_eq!(
         ends(&mut g, "select ?y where /ann (knows/likes+) ?y"),

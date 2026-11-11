@@ -35,3 +35,27 @@ select ?x, ?y where ?x (parent{3}) ?y
 
 -- `p++` is the original form of `(p+)`, and allows a variable predicate.
 select ?p, ?d by ?p, ?d where /ann ?p++ ?d
+
+-- `as ?n` in the parentheses gives the length: the least number of links
+-- of a chain joining the pair.  Still one row a pair.
+select ?d, ?n by ?n where /ann (parent+ as ?n) ?d
+
+-- Every link of the expression counts, and `*` joins a node to itself by
+-- none: how far each relative of /cat is, by any link either way.
+select ?x, ?n by ?n, ?x where /cat ((parent | ^parent | guardian | ^guardian)* as ?n) ?x
+
+-- A number there is required of the shortest chain: `{1,3}` reaches /ben,
+-- /cat and /dan, and only /dan is 3 links away.
+select ?d where /ann (parent{1,3} as 3) ?d
+
+-- The length is a value like any other: the nearest of /ann's descendants
+-- with a child of their own.
+select min(?n) as ?nearest where /ann (parent+ as ?n) ?d . ?d parent ?
+
+-- A path from each row of a pattern is searched once from them all when
+-- only the ends are asked for, each once: `distinct`, or within `not`.
+insert /ben moved true . /eve moved true
+
+select distinct ?x by ?x where ?who moved true . ?who ((parent | knows | likes)+) ?x
+
+\explain select distinct ?x by ?x where ?who moved true . ?who ((parent | knows | likes)+) ?x

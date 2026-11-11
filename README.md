@@ -201,7 +201,13 @@ batches.
 - **Paths and rules:** path patterns match transitive closures, path
   expressions (`PathExpr`) chains of links like regular expressions, and
   rules define recursive relations (Datalog-style, stratified negation),
-  evaluated semi-naively.
+  evaluated semi-naively.  A path expression can give its **length**
+  (`path_length`): the least number of links of a chain joining each pair,
+  as a number, bound or required.  A path from each row of the patterns
+  before it is searched **once from all the rows** when only its far ends
+  are wanted, each once (a `distinct` query selecting nothing bound before
+  it, or a negation run once), so that what several rows reach is visited
+  once; `explain` says so.
 - **Planning** orders the patterns by estimated cost, from index counts and
   the graph's statistics, choosing a bind join (an index lookup per row) or a
   hash join for each. It may first reduce the top group by constraint
@@ -313,9 +319,14 @@ have any predicate.)
   100`, with string, number, time and vector functions: `vector("[0.1,
   0.2]")`, `distance(?a, ?b, "cosine")`), link nodes (`<< /a knows /b
   >> since 2019`), transitive predicates (`p++`), path expressions (`?x (knows+
-  / ^parent | guardian{1,3}) ?y`, with keys as steps), calls of rules, and
+  / ^parent | guardian{1,3}) ?y`, with keys as steps, and `as ?n` before the
+  `)` for the least number of links joining each pair: `/a ((calls | ^calls)*
+  as ?n) ?x` is each node's distance from `/a`, and `as 2` requires it),
+  calls of rules, and
   nearest-neighbour search (`nearest(embedding $q 10 ?v ?d) . ?doc
-  embedding ?v`).
+  embedding ?v`).  A `select distinct` of a path's far ends alone (`select
+  distinct ?x where ?f changed true . ?f (imports+) ?x`) is one search from
+  all its rows, which `\explain` shows as `search from all rows at once`.
 - **The tour's shorter forms:** a predicate without an object (`?s type`), a
   subject alone (`lookup ?subjects`), `lookup P where Q`, `<<` / `>>` to
   reverse and chain predicates and `!p` to reverse one, `+` after objects,
@@ -619,6 +630,7 @@ src/
   tuple_index.rs      built-in graph indexes: links by linkage, values, SPO,
                       intersections (tests in tuple_index/)
   stats.rs            per-predicate link statistics for query planning
+  id_hash.rs          a fast hash for sets and maps keyed by ids
   times.rs            the time of each commit, mapping times to ids, and
                       ISO 8601 times
   vector.rs           vectors as values: encoding, text and distances
@@ -669,7 +681,10 @@ shell's line editor, rustyline 19, needs 1.95, so on an older toolchain build
 the library alone with `--no-default-features`. CI (`.github/workflows/ci.yml`)
 runs the formatting, clippy, docs and link checks, the tests on Linux and macOS, and
 both minimum toolchains. [`BENCHMARKS.md`](BENCHMARKS.md) records the
-benchmarks' numbers on one machine, to compare a change with.
+benchmarks' numbers on one machine, to compare a change with; the traversal
+bench runs each query beside the same work on adjacency arrays, and
+[issue 040](issues/040-traversal-and-load-speed-against-an-adjacency-array.md)
+has what was profiled, what is fixed and what remains of that gap.
 
 graqlite's runtime dependencies are [libc](https://crates.io/crates/libc), for
 memory mapping, [arc-swap](https://crates.io/crates/arc-swap), for the index

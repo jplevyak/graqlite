@@ -216,9 +216,16 @@ impl Printer {
             Pattern::Path(s, pr, o) => {
                 format!("{} {}++ {}", self.node(s), self.node(pr), self.node(o))
             }
-            Pattern::PathExpr(s, path, o) => {
-                format!("{} ({}) {}", self.node(s), path, self.node(o))
-            }
+            Pattern::PathExpr(s, path, o, length) => match length {
+                Some(n) => format!(
+                    "{} ({} as {}) {}",
+                    self.node(s),
+                    path,
+                    self.node(n),
+                    self.node(o)
+                ),
+                None => format!("{} ({}) {}", self.node(s), path, self.node(o)),
+            },
             Pattern::Link(l, s, pr, o) => format!(
                 "<< :{} {} {} {} >>",
                 self.node(l),
@@ -377,9 +384,12 @@ pub(super) fn each_node_mut(p: &mut Pattern, f: &mut impl FnMut(&mut Node)) {
             f(pr);
             f(o);
         }
-        Pattern::PathExpr(s, _, o) => {
+        Pattern::PathExpr(s, _, o, length) => {
             f(s);
             f(o);
+            if let Some(n) = length {
+                f(n);
+            }
         }
         Pattern::Link(l, s, pr, o) => {
             f(l);
@@ -433,9 +443,12 @@ pub(super) fn each_node(p: &Pattern, f: &mut impl FnMut(&Node)) {
             f(pr);
             f(o);
         }
-        Pattern::PathExpr(s, _, o) => {
+        Pattern::PathExpr(s, _, o, length) => {
             f(s);
             f(o);
+            if let Some(n) = length {
+                f(n);
+            }
         }
         Pattern::Call(_, args) => args.iter().for_each(f),
         Pattern::Compare(a, _, b) => {

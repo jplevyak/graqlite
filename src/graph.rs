@@ -1560,10 +1560,11 @@ impl Graph {
         if linkage == Linkage::When {
             return IdSet::new();
         }
-        let mut links = IdSet::new();
+        let mut links = Vec::new();
         for id in ids {
             links.extend(tuple_index::find_links(&self.local, linkage, id));
         }
+        let mut links = IdSet::from_unsorted(links);
         links.retain(|&id| self.with_link(id, |_| ()).is_some());
         links
     }
@@ -1655,7 +1656,9 @@ impl Graph {
             Linkage::Object => (Intersection::PredicateObject, Linkage::Subject),
             _ => return Err(Error::InvalidArgument("linkage must be subject or object")),
         };
-        let mut links = IdSet::new();
+        // Gathered, then sorted once: the links of one id needn't follow
+        // those of the id before.
+        let mut links = Vec::new();
         for id in ids {
             let (x, y) = match intersection {
                 Intersection::SubjectPredicate => (id, predicate),
@@ -1668,7 +1671,7 @@ impl Graph {
                 y,
             ));
         }
-        let links = self.live(&links, as_of);
+        let links = self.live(&IdSet::from_unsorted(links), as_of);
         let entities = self.project(&links, other);
         Ok((links, entities))
     }

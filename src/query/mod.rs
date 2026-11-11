@@ -74,7 +74,16 @@
 //! found by searching from whichever end is bound.  A
 //! [path expression](Group::path_expr) generalizes it to a regular
 //! expression over links ([`PathExpr`]), compiled to an automaton and
-//! searched the same way.
+//! searched the same way; it can give the least number of links joining
+//! each pair ([`path_length`](Group::path_length)).
+//!
+//! A path is searched from the bound end of each row.  When the rows are
+//! wanted only for the far ends they reach, each once (a
+//! [`distinct`](Query::distinct) query that selects, orders by and later
+//! reads nothing bound before the path; or a negation run once), one search
+//! starts from all the rows: the rows are the same, and what several of them
+//! reach is visited once.  A path giving its length is searched from each
+//! row, as the length is of each pair.
 //!
 //! A [`Relation`] is defined by [`rule`](Query::rule)s, each a head of
 //! variables and a body group, and matched by [`call`](Group::call)s.
@@ -435,6 +444,10 @@ pub struct PathPattern {
     pub predicate: Term,
     pub object: Term,
     pub expr: Option<Arc<PathExpr>>,
+    /// The least number of links of a chain joining each pair, as a number
+    /// (see [`Group::path_length`]): bound, if an unbound variable, or else
+    /// required.
+    pub length: Option<Term>,
     /// The id as of which this pattern sees the graph, overriding the
     /// query's.
     pub as_of: Option<u64>,
@@ -452,6 +465,7 @@ impl PathPattern {
     fn vars(&self) -> impl Iterator<Item = Var> + '_ {
         self.terms()
             .into_iter()
+            .chain(self.length)
             .filter_map(Term::var)
             .chain(self.mark)
     }
@@ -836,6 +850,7 @@ impl Group {
             predicate: predicate.into(),
             object: object.into(),
             expr: None,
+            length: None,
             as_of: None,
             mark: None,
         });
@@ -855,9 +870,29 @@ impl Group {
             predicate: Term::Id(0),
             object: object.into(),
             expr: Some(Arc::new(expr)),
+            length: None,
             as_of: None,
             mark: None,
         });
+        self
+    }
+
+    /// Makes the last path expression added give its length: for each pair
+    /// it matches, `length` is the least number of links of a chain joining
+    /// them that the expression follows, as a number (the value with its
+    /// decimal digits, [ephemeral](Graph::ephemeral_value) if the graph
+    /// hasn't it).  Every link of the expression counts, so `(a+ / b)` is at
+    /// least 2, and a pair joined by the empty path, as `(a*)` joins an
+    /// entry to itself, is 0.  The pattern still matches each pair once.
+    ///
+    /// A `length` that is known, a constant or a variable bound by the rest
+    /// of the group, is required instead: the pattern matches the pairs
+    /// whose shortest chain has that many links, which are fewer than those
+    /// joined by some chain of that many (`{n}`).
+    pub fn path_length(&mut self, length: impl Into<Term>) -> &mut Self {
+        if let Some(p) = self.paths.last_mut() {
+            p.length = Some(length.into());
+        }
         self
     }
 
@@ -1019,6 +1054,18 @@ impl Group {
         for p in &self.paths {
             if let Some(e) = &p.expr {
                 e.check().map_err(Error::InvalidArgument)?;
+            }
+            if let Some(length) = p.length {
+                if p.expr.is_none() {
+                    return Err(Error::InvalidArgument(
+                        "a path's length is of a path expression",
+                    ));
+                }
+                if length.var().is_some() && [p.subject, p.object].contains(&length) {
+                    return Err(Error::InvalidArgument(
+                        "a path's length is a variable of its own, not one of its ends",
+                    ));
+                }
             }
         }
         for c in &self.calls {
@@ -1927,8 +1974,12 @@ impl Query {
     }
 
     fn path_name(&self, p: &PathPattern, name: Namer<'_>) -> String {
+        let length = match p.length {
+            Some(n) => format!(" as {}", self.term_name(n, name)),
+            None => String::new(),
+        };
         let predicate = match &p.expr {
-            Some(e) => format!("({})", e.display(name)),
+            Some(e) => format!("({}{length})", e.display(name)),
             None => format!("{}++", self.term_name(p.predicate, name)),
         };
         let spo = format!(

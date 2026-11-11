@@ -700,8 +700,9 @@ pub enum Pattern {
     Node(Node),
     /// A transitive predicate: `s p++ o`.
     Path(Node, Node, Node),
-    /// A path expression in predicate position: `s (knows / likes+) o`.
-    PathExpr(Node, Path, Node),
+    /// A path expression in predicate position: `s (knows / likes+) o`,
+    /// and its length, if asked for: `s (knows+ as ?n) o`.
+    PathExpr(Node, Path, Node, Option<Node>),
     /// A triple whose link is bound to its first node, a variable or blank
     /// node: written `<< :?l s p o >>`, which as a node stands for `?l`.
     Link(Node, Node, Node, Node),
@@ -2764,6 +2765,23 @@ impl Parser {
             };
             if self.punct("(") {
                 let mut path = self.path_alt()?;
+                // The least number of links: a variable, or a number
+                // required.
+                let length = if self.keyword("as") {
+                    let (line, column) = self.here();
+                    match self.node(out)? {
+                        n @ (Node::Var(_) | Node::Value(_) | Node::Param(_)) => Some(n),
+                        _ => {
+                            return Err(Error::Syntax {
+                                line,
+                                column,
+                                message: "a path's length is a variable or a number".into(),
+                            });
+                        }
+                    }
+                } else {
+                    None
+                };
                 self.expect(&Token::Punct(")"))?;
                 if self.punct("++") {
                     path = Path::Repeat(Box::new(path), 1, None);
@@ -2774,7 +2792,7 @@ impl Parser {
                     let object = self.object(out, first)?;
                     last_object = Some(object.clone());
                     let (s, o) = orient(&current, object);
-                    let p = Pattern::PathExpr(s, path.clone(), o);
+                    let p = Pattern::PathExpr(s, path.clone(), o, length.clone());
                     out.push(if negated || object_negated {
                         Pattern::Not(Box::new(p))
                     } else {
@@ -3964,12 +3982,16 @@ impl Lowering<'_> {
                 }
                 self.mark_path(group);
             }
-            Pattern::PathExpr(s, path, o) => {
+            Pattern::PathExpr(s, path, o, length) => {
                 let (s, o) = (self.term(s), self.term(o));
-                if path.is_chain() {
+                if path.is_chain() && length.is_none() {
                     self.chain(group, s, path, o);
                 } else {
                     group.path_expr(s, path.resolve(self.g), o);
+                    if let Some(n) = length {
+                        let n = self.term(n);
+                        group.path_length(n);
+                    }
                     if let Some(id) = self.as_of {
                         group.path_at(id);
                     }
@@ -4222,7 +4244,7 @@ fn lower_full(
 /// Whether `p` is a path expression that is a chain of steps, matched by
 /// joining patterns.
 fn is_chain(p: &Pattern) -> bool {
-    matches!(p, Pattern::PathExpr(_, path, _) if path.is_chain())
+    matches!(p, Pattern::PathExpr(_, path, _, None) if path.is_chain())
 }
 
 /// Whether `e` is a parameter.
@@ -4294,7 +4316,7 @@ fn lets(p: &Pattern) -> Result<HashMap<String, Expr>> {
             Pattern::Triple(a, b, c) | Pattern::Path(a, b, c) => {
                 [a, b, c].into_iter().try_for_each(check)
             }
-            Pattern::PathExpr(a, _, c) => [a, c].into_iter().try_for_each(check),
+            Pattern::PathExpr(a, _, c, n) => [a, c].into_iter().chain(n).try_for_each(check),
             Pattern::Link(l, a, b, c) => [l, a, b, c].into_iter().try_for_each(check),
             Pattern::Call(_, args) => args.iter().try_for_each(check),
             Pattern::Node(n) => check(n),
@@ -4414,8 +4436,8 @@ fn names_bound(p: &Pattern, blanks: bool, nodes: bool) -> Vec<String> {
                 }
             }
             Pattern::Window(p, _) | Pattern::Optional(p) => collect(p, out),
-            Pattern::PathExpr(s, _, o) => {
-                for n in [s, o] {
+            Pattern::PathExpr(s, _, o, length) => {
+                for n in [s, o].into_iter().chain(length) {
                     match n {
                         Node::Var(name) => out.push(name.clone()),
                         Node::Blank(name) if blanks => out.push(name.clone()),
@@ -6570,7 +6592,7 @@ fn each_statement_key(statement: &mut Statement, f: &mut impl FnMut(&mut String)
             }
         }
         match p {
-            Pattern::PathExpr(_, path, _) => steps(path, f),
+            Pattern::PathExpr(_, path, _, _) => steps(path, f),
             Pattern::And(ps) | Pattern::Or(ps) => ps.iter_mut().for_each(|p| paths(p, f)),
             Pattern::Not(p)
             | Pattern::Window(p, _)
